@@ -122,6 +122,7 @@ bool WakeWord::inferFeatures(const int8_t *features) {
     if (interpreter->Invoke() != kTfLiteOk) return false;
     probabilityIndex_ = (probabilityIndex_ + 1) % window_;
     lastProbability_ = interpreter->output(0)->data.uint8[0];
+    if (lastProbability_ > maxProbability_) maxProbability_ = lastProbability_;
     probabilities_[probabilityIndex_] = lastProbability_;
   }
   if (probabilities_[probabilityIndex_] < cutoff_) {

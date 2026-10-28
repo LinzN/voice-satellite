@@ -27,6 +27,8 @@ class WakeWord {
 
   bool ready() const { return ready_; }
   uint8_t lastProbability() const { return lastProbability_; }
+  /* highest probability since the last call (for tuning the cutoff) */
+  uint8_t takeMaxProbability() { uint8_t value = maxProbability_; maxProbability_ = 0; return value; }
 
  private:
   bool inferFeatures(const int8_t *features);
@@ -39,6 +41,7 @@ class WakeWord {
   int16_t ignoreSlices_ = -100;
   uint8_t strideStep_ = 0;
   uint8_t lastProbability_ = 0;
+  uint8_t maxProbability_ = 0;
   int16_t pending_[160];
   size_t pendingCount_ = 0;
 };

@@ -188,8 +188,14 @@ static String hmacHex(const String &key, const String &message) {
 }
 
 /* ------------------------------------------------------------------ state handling */
+static const char *stateName(DeviceState value) {
+  static const char *names[] = {"offline", "idle", "listening", "thinking", "speaking", "pending", "denied"};
+  return value <= ST_DENIED ? names[value] : "?";
+}
+
 static void setState(DeviceState next) {
   if (state == next) return;
+  Serial.printf("[state] %s -> %s\n", stateName(state), stateName(next));
   state = next;
   stateSince = millis();
   if (next != ST_LISTENING) micLevel = 0;
@@ -524,6 +530,12 @@ static void wakeTask(void *) {
       wakeWord.reset();
     }
     if (got == 0) continue;
+    static uint32_t lastReport = 0;
+    if (millis() - lastReport > 5000) {
+      lastReport = millis();
+      uint8_t peak = wakeWord.takeMaxProbability();
+      if (peak > 25) Serial.printf("[wake] highest probability in the last 5 s: %.2f\n", peak / 255.0f);
+    }
     if (wakeWord.process(chunk, got / sizeof(int16_t)) && state == ST_IDLE) {
       Serial.printf("[wake] detected (p=%u)\n", wakeWord.lastProbability());
       startListening(true);
@@ -761,6 +773,8 @@ static void calibrateTouch() {
     }
     pad.baseline = sum / 16.0f;
   }
+  Serial.printf("[touch] baselines left %.0f, center %.0f, right %.0f (threshold +-%.0f%%)\n", pads[0].baseline,
+                pads[1].baseline, pads[2].baseline, TOUCH_SENSITIVITY * 100);
 }
 
 /* returns true once per tap (on release, debounced) */
@@ -779,6 +793,7 @@ static bool pollPad(TouchPad &pad) {
 }
 
 static void onCenterTap() {
+  Serial.printf("[touch] center tap in state %s%s\n", stateName(state), muted ? " (muted)" : "");
   switch (state) {
     case ST_IDLE:
       startListening();
@@ -803,7 +818,18 @@ static void onCenterTap() {
 
 static void touchTask(void *) {
   calibrateTouch();
+  if (MUTE_ACTIVE_LEVEL >= 0) {
+    muted = digitalRead(MUTE_PIN) == (MUTE_ACTIVE_LEVEL ? HIGH : LOW);
+    Serial.printf("[mute] switch pin reads %d -> %s\n", digitalRead(MUTE_PIN), muted ? "MUTED" : "microphone on");
+  }
+  uint32_t lastReport = 0;
   for (;;) {
+    /* raw touch readings for the first two minutes, to check TOUCH_SENSITIVITY */
+    if (millis() < 120000 && millis() - lastReport > 2000) {
+      lastReport = millis();
+      Serial.printf("[touch] raw left %u center %u right %u\n", (unsigned)touchRead(pads[0].pin),
+                    (unsigned)touchRead(pads[1].pin), (unsigned)touchRead(pads[2].pin));
+    }
     if (pollPad(pads[1])) onCenterTap();
     if (pollPad(pads[0])) {
       setVolume(volumeLevel - 1, true);
@@ -820,6 +846,7 @@ static void touchTask(void *) {
       bool nowMuted = digitalRead(MUTE_PIN) == (MUTE_ACTIVE_LEVEL ? HIGH : LOW);
       if (nowMuted != muted) {
         muted = nowMuted;
+        Serial.printf("[mute] %s\n", muted ? "MUTED" : "microphone on");
         if (muted && state == ST_LISTENING) {
           interruptSpeaking();
           setState(ST_IDLE);
