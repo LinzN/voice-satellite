@@ -145,6 +145,51 @@ def convert_folder(source_glob_root, pattern, target):
         write_wav(out, audio)
 
 
+def audioset_background(data, parts):
+    """Download the first balanced-train parts of AudioSet (tar with FLAC, or parquet) as 16 kHz WAV."""
+    import io
+    import re
+    import numpy as np
+    import soundfile
+    from huggingface_hub import HfApi, hf_hub_download
+    from scipy.signal import resample_poly
+    from math import gcd
+
+    target = data / "background_16k"
+    target.mkdir(parents=True, exist_ok=True)
+    stamp = data / "audioset.done"
+    if stamp.exists():
+        return
+    files = HfApi().list_repo_files("agkphysics/AudioSet", repo_type="dataset")
+    candidates = sorted(f for f in files if re.search(r"bal_train", f) and f.endswith((".tar", ".parquet")))
+    if not candidates:
+        raise RuntimeError("no balanced-train files in agkphysics/AudioSet: " + ", ".join(files[:20]))
+    for name in candidates[:parts]:
+        print(f"AudioSet: {name}", flush=True)
+        local = Path(hf_hub_download("agkphysics/AudioSet", name, repo_type="dataset", local_dir=data / "audioset"))
+        if name.endswith(".tar"):
+            run(["tar", "-xf", local, "-C", data / "audioset"])
+            convert_folder(data / "audioset", "**/*.flac", target)
+            continue
+        import pyarrow.parquet as pq
+        table = pq.read_table(local)
+        column = next(c for c in table.column_names if "audio" in c.lower() or "flac" in c.lower())
+        for index, row in enumerate(table.column(column).to_pylist()):
+            payload = row.get("bytes") if isinstance(row, dict) else row
+            if not payload:
+                continue
+            try:
+                audio, rate = soundfile.read(io.BytesIO(payload), dtype="float32", always_2d=True)
+            except Exception:
+                continue
+            audio = audio.mean(axis=1)
+            if rate != 16000:
+                divisor = gcd(rate, 16000)
+                audio = resample_poly(audio, 16000 // divisor, rate // divisor)
+            write_wav(target / f"{Path(name).stem}_{index}.wav", audio)
+    stamp.write_text("ok")
+
+
 def stage_data(work, args):
     import numpy as np
     data = work / "data"
@@ -172,27 +217,35 @@ def stage_data(work, args):
             name = row["audio"]["path"].split("/")[-1]
             write_wav(rir / name, np.asarray(row["audio"]["array"]), 16000)
 
-    # background noise: two AudioSet parts and the FMA music set
-    for part in args.audioset_parts:
-        tar = data / "audioset" / part
-        download(f"{HF}/agkphysics/AudioSet/resolve/main/data/{part}", tar)
-        stamp = data / "audioset" / (part + ".extracted")
-        if not stamp.exists():
-            run(["tar", "-xf", tar, "-C", data / "audioset"])
-            stamp.write_text("ok")
-    convert_folder(data / "audioset" / "audio", "**/*.flac", data / "background_16k")
-    fma = data / "fma" / "fma_xs.zip"
-    download(f"{HF}/mchl914/fma_xsmall/resolve/main/fma_xs.zip", fma)
-    if not (data / "fma" / ".extracted").exists():
-        run(["unzip", "-q", "-o", fma, "-d", data / "fma"])
-        (data / "fma" / ".extracted").write_text("ok")
-    convert_folder(data / "fma", "**/*.mp3", data / "fma_16k")
+    # background noise: a few AudioSet parts and the FMA music set. Dataset layouts on HuggingFace change,
+    # so the files are looked up instead of hard coded, and a missing source is skipped with a warning.
+    sources = 0
+    try:
+        audioset_background(data, args.audioset_parts)
+        sources += 1
+    except Exception as error:
+        print(f"WARNING: AudioSet background noise not available: {error}")
+    try:
+        fma = data / "fma" / "fma_xs.zip"
+        download(f"{HF}/mchl914/fma_xsmall/resolve/main/fma_xs.zip", fma)
+        if not (data / "fma" / ".extracted").exists():
+            run(["unzip", "-q", "-o", fma, "-d", data / "fma"])
+            (data / "fma" / ".extracted").write_text("ok")
+        convert_folder(data / "fma", "**/*.mp3", data / "fma_16k")
+        sources += 1
+    except Exception as error:
+        print(f"WARNING: FMA music not available: {error}")
+    if sources == 0:
+        raise SystemExit("No background noise could be downloaded, check the internet connection / HuggingFace")
 
     # negative spectrogram features prepared for microWakeWord
     negatives = work / "negative_datasets"
+    from huggingface_hub import HfApi, hf_hub_download
+    available = HfApi().list_repo_files("kahrendt/microwakeword", repo_type="dataset")
     for name in NEGATIVE_FEATURES:
-        archive = negatives / name
-        download(f"{HF}/kahrendt/microwakeword/resolve/main/{name}", archive)
+        if name not in available:
+            raise SystemExit(f"{name} is missing in kahrendt/microwakeword, files there: {available}")
+        archive = Path(hf_hub_download("kahrendt/microwakeword", name, repo_type="dataset", local_dir=negatives))
         stamp = negatives / (name + ".extracted")
         if not stamp.exists():
             run(["unzip", "-q", "-o", archive, "-d", negatives])
@@ -402,7 +455,7 @@ def main():
     parser.add_argument("--adversarial-en", type=int, default=3000)
     parser.add_argument("--batch-size", type=int, default=100)
     parser.add_argument("--steps", type=int, default=30000)
-    parser.add_argument("--audioset-parts", nargs="+", default=["bal_train09.tar", "bal_train08.tar"])
+    parser.add_argument("--audioset-parts", type=int, default=2, help="number of AudioSet files for background noise")
     args = parser.parse_args()
     if args.smoke:
         args.positive_de, args.positive_en, args.adversarial_de, args.adversarial_en = 60, 20, 40, 10
