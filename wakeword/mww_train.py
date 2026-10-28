@@ -386,6 +386,12 @@ def stage_train(work, args):
     config_path.write_text(yaml.dump(config))
 
     python = args.train_python or sys.executable
+    # TensorFlow does not find every CUDA library of its pip packages by itself (libcusolver.so.11 with
+    # TensorFlow 2.21), so all of them are put on the library path of the training processes
+    venv = Path(python).absolute().parent.parent if args.train_python else Path(sys.prefix)
+    cuda_dirs = sorted(str(d) for d in venv.glob("lib/python3*/site-packages/nvidia/*/lib"))
+    if cuda_dirs:
+        TRAIN_ENV["LD_LIBRARY_PATH"] = ":".join(cuda_dirs + [os.environ.get("LD_LIBRARY_PATH", "")]).rstrip(":")
     env = dict(TRAIN_ENV)
     if args.smoke or args.cpu or not gpu_usable(python):
         log("Training on the CPU")
