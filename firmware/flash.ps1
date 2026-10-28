@@ -110,6 +110,7 @@ if ($null -eq $settings) {
         otaPassword    = Ask "Password for Wi-Fi updates" "mirra-ota"
         wakeWordCutoff = Ask "Wake word cutoff (0.5-0.99, higher = fewer false wake ups)" "0.90"
         volume         = [int](Ask "Default volume 0-10" "6")
+        touchSensitivity = Ask "Touch sensitivity (relative change, lower = more sensitive)" "0.025"
     }
     if (-not $settings.wifiSsid -or -not $settings.serverHost -or -not $settings.deviceKey) {
         Fail "Wi-Fi name, server address and device key are required"
@@ -143,7 +144,7 @@ $config = @"
 #define DEVICE_NAME $(CString $Name)
 #define OTA_PASSWORD $(CString $settings.otaPassword)
 #define DEFAULT_VOLUME $([int]$settings.volume)
-#define TOUCH_SENSITIVITY 0.15f
+#define TOUCH_SENSITIVITY $(if ($settings.touchSensitivity) { [double]::Parse([string]$settings.touchSensitivity, [Globalization.CultureInfo]::InvariantCulture).ToString("0.000", [Globalization.CultureInfo]::InvariantCulture) } else { "0.025" })f
 #define MUTE_ACTIVE_LEVEL 1
 #define LED_BRIGHTNESS 160
 #define WAKE_WORD_ENABLED $(if ($wakeWord) { 1 } else { 0 })

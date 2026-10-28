@@ -23,8 +23,9 @@
 /* Speaker volume 0..10 after the first boot; afterwards the left/right touch pads change it */
 #define DEFAULT_VOLUME 6
 
-/* Touch sensitivity: relative change of the touch reading that counts as a touch (0.05 .. 0.5) */
-#define TOUCH_SENSITIVITY 0.15f
+/* Touch sensitivity: relative change of the touch reading that counts as a touch. Through the shell of a
+ * Home Mini a tap changes the reading by only 3-5 %; raise it if pads trigger by themselves (0.015 .. 0.2) */
+#define TOUCH_SENSITIVITY 0.025f
 
 /* Mute switch: 1 if the switch pulls the pin HIGH when muted (Onju V3 default), 0 for LOW, -1 to ignore it */
 #define MUTE_ACTIVE_LEVEL 1

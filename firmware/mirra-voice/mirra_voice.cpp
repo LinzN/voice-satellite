@@ -781,9 +781,14 @@ static void calibrateTouch() {
 static bool pollPad(TouchPad &pad) {
   float value = touchRead(pad.pin);
   /* the ESP32-S3 reading rises on touch, older chips fall: accept both directions */
-  bool touching = fabsf(value - pad.baseline) > pad.baseline * TOUCH_SENSITIVITY;
+  float delta = fabsf(value - pad.baseline) / pad.baseline;
+  /* hysteresis: a touch starts above the sensitivity and ends below half of it */
+  bool touching = pad.down ? delta > TOUCH_SENSITIVITY * 0.5f : delta > TOUCH_SENSITIVITY;
   uint32_t now = millis();
   if (!touching) pad.baseline += 0.01f * (value - pad.baseline);
+  if (touching && !pad.down && now - pad.changed > 60) {
+    Serial.printf("[touch] pad %d pressed, change %.1f%%\n", pad.pin, delta * 100);
+  }
   if (touching != pad.down && now - pad.changed > 60) {
     pad.down = touching;
     pad.changed = now;
