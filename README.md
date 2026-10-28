@@ -103,6 +103,17 @@ arduino-cli upload  --fqbn esp32:esp32:esp32s3:CDCOnBoot=cdc,PSRAM=opi,Partition
 
 The partition scheme can only be changed over USB; later updates work over Wi-Fi (Arduino OTA, host name `mirra-voice-xxxxxx`, password `OTA_PASSWORD`).
 
+**Windows, one command:** `firmware/flash.ps1` (or double-click `firmware/flash.cmd`) downloads arduino-cli, the
+ESP32 core and the library into `firmware/tools`, asks once for Wi-Fi, server, device key and OTA password
+(stored in `firmware/settings.json`), writes `config.h`, takes the wake word model from `../wakeword` or
+`../mirra-wakeword` if present, builds and flashes the board it finds on USB:
+
+```powershell
+.\flash.ps1 -Name "Küche"                     # USB
+.\flash.ps1 -Name "Küche" -Ota 192.168.1.50   # later updates over Wi-Fi
+.\flash.ps1 -Name "Küche" -Monitor            # and open the serial monitor
+```
+
 Settings in `config.h` you may need to adjust:
 
 - `TOUCH_SENSITIVITY` if taps are missed (lower) or trigger by themselves (higher). The pads calibrate at

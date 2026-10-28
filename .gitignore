@@ -8,3 +8,6 @@
 /wakeword/hey_mirra*
 /wakeword/results/
 /wakeword/*.log
+/firmware/build/
+/firmware/tools/
+/firmware/settings.json

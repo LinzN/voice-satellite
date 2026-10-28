@@ -1,0 +1,165 @@
+﻿<#
+  Build the Mirra voice satellite firmware and flash it onto an Onju V3 board.
+
+  Usage (PowerShell, or double-click flash.cmd):
+    .\flash.ps1 -Name "Küche"                 USB, the board is found automatically
+    .\flash.ps1 -Name "Küche" -Port COM5      USB, fixed port
+    .\flash.ps1 -Name "Küche" -Ota 192.168.1.50   update over Wi-Fi (after the first USB flash)
+    .\flash.ps1 -Monitor                      open the serial monitor after flashing
+    .\flash.ps1 -Reconfigure                  ask for Wi-Fi, server and keys again
+
+  The first run downloads arduino-cli, the ESP32 core and the NeoPixel library into .\tools (about 1.5 GB)
+  and asks for the settings, which are stored in settings.json next to this script.
+  The wake word model hey_mirra_model.h is taken from ..\mirra-wakeword or ..\wakeword if it exists.
+#>
+param(
+    [string]$Name = "",
+    [string]$Port = "",
+    [string]$Ota = "",
+    [switch]$Monitor,
+    [switch]$Reconfigure
+)
+
+$ErrorActionPreference = "Stop"
+$here = $PSScriptRoot
+$sketch = Join-Path $here "mirra-voice"
+$build = Join-Path $here "build"
+$tools = Join-Path $here "tools"
+$cli = Join-Path $tools "arduino-cli.exe"
+$settingsFile = Join-Path $here "settings.json"
+$fqbn = "esp32:esp32:esp32s3:CDCOnBoot=cdc,PSRAM=opi,PartitionScheme=min_spiffs"
+$coreVersion = "3.1.1"
+$cliVersion = "1.1.1"
+
+function Step($text) { Write-Host "`n=== $text" -ForegroundColor Cyan }
+function Fail($text) { Write-Host "`nERROR: $text" -ForegroundColor Red; exit 1 }
+function Arduino { & $cli @args; if ($LASTEXITCODE -ne 0) { Fail "arduino-cli $($args[0]) failed" } }
+
+# arduino-cli keeps everything inside .\tools, nothing is installed system-wide
+$env:ARDUINO_DIRECTORIES_DATA = Join-Path $tools "data"
+$env:ARDUINO_DIRECTORIES_DOWNLOADS = Join-Path $tools "downloads"
+$env:ARDUINO_DIRECTORIES_USER = Join-Path $tools "user"
+$env:ARDUINO_BOARD_MANAGER_ADDITIONAL_URLS = "https://espressif.github.io/arduino-esp32/package_esp32_index.json"
+
+# ------------------------------------------------------------------ tools
+if (-not (Test-Path $cli)) {
+    Step "Downloading arduino-cli $cliVersion"
+    New-Item -ItemType Directory -Force $tools | Out-Null
+    $zip = Join-Path $tools "arduino-cli.zip"
+    Invoke-WebRequest -UseBasicParsing -OutFile $zip `
+        "https://github.com/arduino/arduino-cli/releases/download/v$cliVersion/arduino-cli_${cliVersion}_Windows_64bit.zip"
+    Expand-Archive -Force $zip $tools
+    Remove-Item $zip
+}
+$coreDir = Join-Path $env:ARDUINO_DIRECTORIES_DATA "packages\esp32\hardware\esp32\$coreVersion"
+if (-not (Test-Path $coreDir)) {
+    Step "Installing the ESP32 core $coreVersion (first run only, takes a while)"
+    Arduino core update-index
+    Arduino core install "esp32:esp32@$coreVersion"
+}
+if (-not (Test-Path (Join-Path $env:ARDUINO_DIRECTORIES_USER "libraries\Adafruit_NeoPixel"))) {
+    Step "Installing Adafruit NeoPixel"
+    Arduino lib install "Adafruit NeoPixel"
+}
+
+# ------------------------------------------------------------------ settings
+$settings = $null
+if ((Test-Path $settingsFile) -and -not $Reconfigure) {
+    $settings = Get-Content -Raw -Encoding UTF8 $settingsFile | ConvertFrom-Json
+}
+if ($null -eq $settings) {
+    Step "Settings (stored in settings.json, shared by all speakers)"
+    function Ask($prompt, $default) {
+        $value = Read-Host "$prompt$(if ($default) { " [$default]" })"
+        if ([string]::IsNullOrWhiteSpace($value)) { return $default } else { return $value.Trim() }
+    }
+    $settings = [ordered]@{
+        wifiSsid       = Ask "Wi-Fi name (SSID)" ""
+        wifiPassword   = Ask "Wi-Fi password" ""
+        serverHost     = Ask "IP address of the STEM server" ""
+        serverPort     = [int](Ask "Port of the voice-satellite plugin" "3100")
+        deviceKey      = Ask "Device key (server.deviceKey of the plugin, shown in the STEM log)" ""
+        otaPassword    = Ask "Password for Wi-Fi updates" "mirra-ota"
+        wakeWordCutoff = Ask "Wake word cutoff (0.5-0.99, higher = fewer false wake ups)" "0.90"
+        volume         = [int](Ask "Default volume 0-10" "6")
+    }
+    if (-not $settings.wifiSsid -or -not $settings.serverHost -or -not $settings.deviceKey) {
+        Fail "Wi-Fi name, server address and device key are required"
+    }
+    $json = $settings | ConvertTo-Json
+    [IO.File]::WriteAllText($settingsFile, $json, (New-Object System.Text.UTF8Encoding($false)))
+    $settings = $json | ConvertFrom-Json
+}
+
+function CString($value) { return '"' + ([string]$value).Replace('\', '\\').Replace('"', '\"') + '"' }
+
+$wakeWord = $false
+$sketchModel = Join-Path $sketch "hey_mirra_model.h"
+$model = @("..\mirra-wakeword\hey_mirra_model.h", "..\wakeword\hey_mirra_model.h") |
+    ForEach-Object { Join-Path $here $_ } | Where-Object { Test-Path $_ } | Select-Object -First 1
+if ($model) {
+    Copy-Item -Force $model $sketchModel
+    $wakeWord = $true
+} elseif (Test-Path $sketchModel) {
+    $wakeWord = $true
+}
+
+$config = @"
+// Generated by flash.ps1 - edit settings.json or run flash.ps1 -Reconfigure instead
+#pragma once
+#define WIFI_SSID $(CString $settings.wifiSsid)
+#define WIFI_PASSWORD $(CString $settings.wifiPassword)
+#define SERVER_HOST $(CString $settings.serverHost)
+#define SERVER_PORT $([int]$settings.serverPort)
+#define DEVICE_KEY $(CString $settings.deviceKey)
+#define DEVICE_NAME $(CString $Name)
+#define OTA_PASSWORD $(CString $settings.otaPassword)
+#define DEFAULT_VOLUME $([int]$settings.volume)
+#define TOUCH_SENSITIVITY 0.15f
+#define MUTE_ACTIVE_LEVEL 1
+#define LED_BRIGHTNESS 160
+#define WAKE_WORD_ENABLED $(if ($wakeWord) { 1 } else { 0 })
+#define WAKE_WORD_CUTOFF $([double]::Parse([string]$settings.wakeWordCutoff, [Globalization.CultureInfo]::InvariantCulture).ToString("0.00", [Globalization.CultureInfo]::InvariantCulture))f
+#define WAKE_WORD_WINDOW 5
+"@
+[IO.File]::WriteAllText((Join-Path $sketch "config.h"), $config, (New-Object System.Text.UTF8Encoding($false)))
+
+# ------------------------------------------------------------------ build
+Step "Building$(if ($Name) { " for '$Name'" }) - wake word: $(if ($wakeWord) { "Hey Mirra" } else { "off (no model, tap to talk)" })"
+Arduino compile --fqbn $fqbn --output-dir $build $sketch
+
+# ------------------------------------------------------------------ flash
+if ($Ota) {
+    Step "Updating $Ota over Wi-Fi"
+    $espota = Join-Path $coreDir "tools\espota.exe"
+    & $espota -i $Ota -p 3232 "--auth=$($settings.otaPassword)" -f (Join-Path $build "mirra-voice.ino.bin") -r
+    if ($LASTEXITCODE -ne 0) { Fail "Wi-Fi update failed (speaker online? same OTA password?)" }
+} else {
+    if (-not $Port) {
+        Step "Looking for the board"
+        $ports = @()
+        $list = (& $cli board list --json | ConvertFrom-Json).detected_ports
+        foreach ($entry in $list) {
+            $p = $entry.port
+            if ($p.protocol -eq "serial" -and $p.properties.vid -match "303A") { $ports += $p.address }
+        }
+        if ($ports.Count -eq 0) {
+            Fail ("No ESP32-S3 found. Connect the board by USB. If it still does not show up, hold the BOOT " +
+                  "button while plugging it in.")
+        }
+        if ($ports.Count -gt 1) {
+            Write-Host "Several boards found: $($ports -join ', ')"
+            $Port = Read-Host "Port"
+        } else {
+            $Port = $ports[0]
+        }
+    }
+    Step "Flashing over $Port"
+    Arduino upload --fqbn $fqbn -p $Port --input-dir $build $sketch
+}
+
+Write-Host "`nDone." -ForegroundColor Green
+if ($Monitor -and $Port) {
+    Step "Serial monitor (Ctrl+C to quit)"
+    & $cli monitor -p $Port -c baudrate=115200
+}
