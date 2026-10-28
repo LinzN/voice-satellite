@@ -23,6 +23,9 @@ import time
 from pathlib import Path
 
 POSITIVE_PHRASES = ["Hey Mirra", "Hey Mirra!", "Hey, Mirra.", "Hei Mirra", "Hey Mirra?", "hey mirra"]
+# How people in the house actually say it: short i, stressed r and a long a ("Mirrraa"), sometimes a long i
+POSITIVE_VARIANTS_DE = ["Hey Mirraa", "Hey Mirrah!", "Hey, Mirrraa.", "Hey Mira", "Hey Mira!", "Hei Mirraa", "Hey Mihra"]
+POSITIVE_VARIANTS_EN = ["Hey Mirrah", "Hey Mira", "Hey Meerah", "Hey Mirra!"]
 
 # Phrases that sound close to the wake word or are said often in the house. The model learns to stay quiet
 # for them; "Mirra" alone is included on purpose, so talking *about* Mirra does not wake her.
@@ -41,14 +44,17 @@ ADVERSARIAL_EN = [
 # Look-alikes that turned out to be too close (or to contain the wake word): the samples are generated with the
 # full lists above (the file number decides the phrase) and these are removed afterwards.
 EXCLUDED_ADVERSARIAL = {"Hey Mira, nein", "Hey Miri", "Hey Meera"}
-MODEL_VERSION = "v2"
+MODEL_VERSION = "v3"
 
 HF = "https://huggingface.co/datasets"
 NEGATIVE_FEATURES = ["dinner_party.zip", "dinner_party_eval.zip", "no_speech.zip", "speech.zip"]
+# English: the multi-speaker generator of piper-sample-generator (mixes speakers).
+# German: the regular Piper voices. The German generator (de_DE-mls-medium.pt) produces 3-8 s of babble for
+# "Hey Mirra" instead of ~0.7 s, which ruined the first model.
 GENERATORS = {
-    "de": "https://github.com/rhasspy/piper-sample-generator/releases/download/v2.0.0/de_DE-mls-medium.pt",
     "en": "https://github.com/rhasspy/piper-sample-generator/releases/download/v2.0.0/en_US-libritts_r-medium.pt",
 }
+GERMAN_VOICE_SHARE = {"mls": 0.55}  # the 236-speaker voice gets this share, the other voices split the rest
 
 
 def log(message):
@@ -121,11 +127,72 @@ def migrate(work):
     if marker.exists() or not (work / "samples" / "adversarial").exists():
         return
     log(f"Updating the work folder to model {MODEL_VERSION}")
-    print(f"removed {prune_adversarial(work)} samples of excluded look-alike phrases")
+    if not (work / ".model-v2").exists():
+        print(f"removed {prune_adversarial(work)} samples of excluded look-alike phrases")
+        shutil.rmtree(work / "features" / "adversarial", ignore_errors=True)
+    # v3: German samples come from the Piper voices now (the German generator produced babble), plus
+    # pronunciation variants; the broken German samples and all synthetic features are rebuilt
+    for old in ("positive/de", "positive/de_variants", "adversarial/de"):
+        shutil.rmtree(work / "samples" / old, ignore_errors=True)
+    shutil.rmtree(work / "features" / "positive", ignore_errors=True)
     shutil.rmtree(work / "features" / "adversarial", ignore_errors=True)
-    for stage in ("features", "train", "export"):
+    for stage in ("samples", "features", "train", "export"):
         (work / f".done-{stage}").unlink(missing_ok=True)
     marker.write_text("ok")
+
+
+def german_voices(work, args):
+    """Download all German Piper voices (ONNX)."""
+    voices_dir = work / "voices"
+    if args.smoke:
+        return sorted(voices_dir.glob("*.onnx"))
+    from huggingface_hub import HfApi, hf_hub_download
+    files = HfApi().list_repo_files("rhasspy/piper-voices")
+    names = sorted(f for f in files if f.startswith("de/de_DE/") and f.endswith(".onnx"))
+    if not names:
+        raise SystemExit("No German voices found in rhasspy/piper-voices")
+    voices = []
+    for name in names:
+        for suffix in ("", ".json"):
+            hf_hub_download("rhasspy/piper-voices", name + suffix, local_dir=voices_dir)
+        voices.append(voices_dir / name)
+    return voices
+
+
+def generate_german(work, args, phrases, total, out_root):
+    """Generate with every German voice in parallel processes, the multi-speaker voice gets the largest share."""
+    from concurrent.futures import ThreadPoolExecutor
+    voices = german_voices(work, args)
+    print("German voices: " + ", ".join(v.stem for v in voices), flush=True)
+    big = [v for v in voices if any(key in v.stem for key in GERMAN_VOICE_SHARE)]
+    rest = [v for v in voices if v not in big]
+    big_share = sum(GERMAN_VOICE_SHARE.values()) if big and rest else (1.0 if big else 0.0)
+    counts = {v: int(total * big_share / len(big)) for v in big}
+    counts.update({v: int(total * (1 - big_share) / len(rest)) for v in rest})
+    text_file = out_root.parent / (out_root.name + ".txt")
+    out_root.mkdir(parents=True, exist_ok=True)
+    text_file.write_text("\n".join(phrases) + "\n", encoding="utf-8")
+    # ONNX voices run on the CPU; CUDA_VISIBLE_DEVICES keeps piper from asking for the CUDA provider
+    env = dict(os.environ, PYTHONPATH=str(work / "piper-sample-generator"), CUDA_VISIBLE_DEVICES="")
+
+    def run_voice(voice):
+        target = out_root / voice.stem
+        count = counts[voice]
+        if target.exists() and len(list(target.glob("*.wav"))) >= count:
+            return
+        target.mkdir(parents=True, exist_ok=True)
+        command = [sys.executable, "-m", "piper_sample_generator", str(text_file), "--model", str(voice),
+                   "--max-samples", str(count), "--length-scales", "0.8", "0.9", "1.0", "1.1", "1.25",
+                   "--noise-scales", "0.5", "0.667", "0.9", "--noise-scale-ws", "0.6", "0.8", "1.0",
+                   "--output-dir", str(target)]
+        result = subprocess.run(command, env=env, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(f"{voice.stem}: {result.stderr[-1500:]}")
+        print(f"  {voice.stem}: {count} samples", flush=True)
+
+    workers = max(1, min(len(voices), (os.cpu_count() or 2) // 2))
+    with ThreadPoolExecutor(workers) as pool:
+        list(pool.map(run_voice, voices))
 
 
 def stage_samples(work, args):
@@ -135,11 +202,14 @@ def stage_samples(work, args):
         download(url, models / name)
         source_json = work / "piper-sample-generator" / "models" / (name + ".json")
         shutil.copy(source_json, models / (name + ".json"))
-    de = models / "de_DE-mls-medium.pt"
     en = models / "en_US-libritts_r-medium.pt"
-    generate(work, args, de, POSITIVE_PHRASES, args.positive_de, work / "samples" / "positive" / "de", None)
+    german_positive = POSITIVE_PHRASES + POSITIVE_VARIANTS_DE
+    german_adversarial = [p for p in ADVERSARIAL_DE if p not in EXCLUDED_ADVERSARIAL]
+    generate_german(work, args, german_positive, args.positive_de + args.variants_de,
+                    work / "samples" / "positive" / "de_voices")
     generate(work, args, en, POSITIVE_PHRASES, args.positive_en, work / "samples" / "positive" / "en", 500)
-    generate(work, args, de, ADVERSARIAL_DE, args.adversarial_de, work / "samples" / "adversarial" / "de", None)
+    generate(work, args, en, POSITIVE_VARIANTS_EN, args.variants_en, work / "samples" / "positive" / "en_variants", 500)
+    generate_german(work, args, german_adversarial, args.adversarial_de, work / "samples" / "adversarial" / "de_voices")
     generate(work, args, en, ADVERSARIAL_EN, args.adversarial_en, work / "samples" / "adversarial" / "en", 500)
     prune_adversarial(work)
     (work / f".model-{MODEL_VERSION}").write_text("ok")
@@ -285,9 +355,97 @@ def stage_data(work, args):
             stamp.write_text("ok")
 
 
+# --------------------------------------------------------------------------- real recordings
+
+def stage_recordings(work, out):
+    """
+    Cut real recordings (phone voice memos with "Hey Mirra" said many times, any format ffmpeg reads) from
+    <out>/recordings into single utterances. The cut pieces are also written to recordings/segments, so they
+    can be checked by listening.
+    """
+    import numpy as np
+    import scipy.io.wavfile
+
+    source = out / "recordings"
+    target = work / "samples" / "real"
+    if not source.exists():
+        source.mkdir(parents=True, exist_ok=True)
+    files = [f for f in source.iterdir() if f.is_file() and not f.name.startswith(".")]
+    shutil.rmtree(target, ignore_errors=True)
+    target.mkdir(parents=True, exist_ok=True)
+    check = source / "segments"
+    shutil.rmtree(check, ignore_errors=True)
+    if not files:
+        print("No recordings in " + str(source) + " - training with synthetic voices only")
+        return 0
+    check.mkdir()
+    total = 0
+    for file in sorted(files):
+        wav = work / "recording.wav"
+        result = subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(file), "-ac", "1", "-ar", "16000",
+                                 "-sample_fmt", "s16", str(wav)])
+        if result.returncode != 0:
+            print(f"skip {file.name}: ffmpeg could not read it")
+            continue
+        _, audio = scipy.io.wavfile.read(wav)
+        audio = audio.astype(np.float32) / 32768.0
+        frame = 480  # 30 ms
+        frames = len(audio) // frame
+        if frames < 10:
+            continue
+        rms = np.sqrt(np.mean(audio[:frames * frame].reshape(frames, frame) ** 2, axis=1)) + 1e-6
+        noise = np.percentile(rms, 20)
+        loud = rms > max(noise * 4, 0.01)
+        # merge loud frames into utterances; pauses shorter than 0.35 s stay inside one utterance
+        segments, start, quiet = [], None, 0
+        for index, is_loud in enumerate(loud):
+            if is_loud:
+                if start is None:
+                    start = index
+                quiet = 0
+            elif start is not None:
+                quiet += 1
+                if quiet > 12:
+                    segments.append((start, index - quiet + 1))
+                    start, quiet = None, 0
+        if start is not None:
+            segments.append((start, frames))
+        count = 0
+        for first, last in segments:
+            length = (last - first) * 0.03
+            if length < 0.35 or length > 2.5:
+                continue
+            a = max(0, first * frame - 2400)
+            b = min(len(audio), last * frame + 2400)
+            clip = (audio[a:b] * 32767).astype(np.int16)
+            name = f"{file.stem}_{count:03d}.wav"
+            scipy.io.wavfile.write(target / name, 16000, clip)
+            scipy.io.wavfile.write(check / name, 16000, clip)
+            count += 1
+        print(f"{file.name}: {count} utterances")
+        total += count
+        wav.unlink(missing_ok=True)
+    print(f"{total} real utterances in total")
+    return total
+
+
+def recordings_changed(work, out):
+    """New or changed recordings invalidate the features and the model."""
+    source = out / "recordings"
+    files = sorted(f"{f.name}:{f.stat().st_size}" for f in source.iterdir() if f.is_file()) if source.exists() else []
+    signature = "\n".join(files)
+    stamp = work / ".recordings"
+    if stamp.exists() and stamp.read_text() == signature:
+        return False
+    stamp.write_text(signature)
+    for stage in ("features", "train", "export"):
+        (work / f".done-{stage}").unlink(missing_ok=True)
+    return True
+
+
 # --------------------------------------------------------------------------- features
 
-def make_features(clips_dir, out_dir, name, background, rirs):
+def make_features(clips_dir, out_dir, name, background, rirs, train_repeat=2):
     from microwakeword.audio.augmentation import Augmentation
     from microwakeword.audio.clips import Clips
     from microwakeword.audio.spectrograms import SpectrogramGeneration
@@ -306,7 +464,7 @@ def make_features(clips_dir, out_dir, name, background, rirs):
         background_min_snr_db=-5, background_max_snr_db=10,
         min_jitter_s=0.195, max_jitter_s=0.205,
     )
-    for split, split_name, repeat, slide in (("training", "train", 2, 10), ("validation", "validation", 1, 10),
+    for split, split_name, repeat, slide in (("training", "train", train_repeat, 10), ("validation", "validation", 1, 10),
                                              ("testing", "test", 1, 1)):
         target = out_dir / split / f"{name}_mmap"
         if target.exists():
@@ -346,6 +504,17 @@ def smoke_negatives(work):
 
 
 def stage_features(work, args):
+    data = work / "data"
+    background = [p for p in (data / "background_16k", data / "fma_16k") if p.exists()]
+    real = work / "samples" / "real"
+    shutil.rmtree(work / "features" / "real", ignore_errors=True)
+    if real.exists() and len(list(real.glob("*.wav"))) >= 10:
+        # few real clips: each one is used many times with different noise and room echo
+        make_features(real, work / "features" / "real", "real", background, data / "mit_rirs", train_repeat=40)
+    stage_features_synthetic(work, args)
+
+
+def stage_features_synthetic(work, args):
     data = work / "data"
     background = [p for p in (data / "background_16k", data / "fma_16k") if p.exists()]
     make_features(work / "samples" / "positive", work / "features" / "positive", "wakeword", background, data / "mit_rirs")
@@ -444,6 +613,8 @@ def stage_train(work, args):
         "window_step_ms": 10,
         "train_dir": str(work / "trained_models" / f"hey_mirra_{MODEL_VERSION}"),
         "features": [
+            *([{"features_dir": str(features / "real"), "sampling_weight": 1.0, "penalty_weight": 1.0, "truth": True,
+                 "truncation_strategy": "truncate_start", "type": "mmap"}] if (features / "real").exists() else []),
             {"features_dir": str(features / "positive"), "sampling_weight": 2.0, "penalty_weight": 1.0, "truth": True,
              "truncation_strategy": "truncate_start", "type": "mmap"},
             {"features_dir": str(features / "adversarial"), "sampling_weight": 2.0, "penalty_weight": 1.0,
@@ -559,6 +730,8 @@ def main():
     parser.add_argument("--positive-de", type=int, default=20000)
     parser.add_argument("--positive-en", type=int, default=6000)
     parser.add_argument("--adversarial-de", type=int, default=12000)
+    parser.add_argument("--variants-de", type=int, default=8000)
+    parser.add_argument("--variants-en", type=int, default=2000)
     parser.add_argument("--adversarial-en", type=int, default=3000)
     parser.add_argument("--batch-size", type=int, default=100)
     parser.add_argument("--steps", type=int, default=20000, help="steps of the first phase, the second has half")
@@ -568,6 +741,7 @@ def main():
     args = parser.parse_args()
     if args.smoke:
         args.positive_de, args.positive_en, args.adversarial_de, args.adversarial_en = 60, 20, 40, 10
+        args.variants_de, args.variants_en = 20, 10
         args.batch_size, args.steps = 10, 60
         args.negative_gb = 0.0005
 
@@ -578,12 +752,13 @@ def main():
 
     migrate(work)
     stages = [("samples", lambda: stage_samples(work, args)), ("data", lambda: stage_data(work, args)),
+              ("recordings", lambda: stage_recordings(work, out) if recordings_changed(work, out) else None),
               ("features", lambda: stage_features(work, args)), ("train", lambda: stage_train(work, args)),
               ("export", lambda: stage_export(work, out))]
     for name, function in stages:
         if args.only and name != args.only:
             continue
-        if done(work, name) and not args.only:
+        if done(work, name) and not args.only and name != "recordings":
             print(f"stage {name}: already done")
             continue
         log(f"Stage {name}")

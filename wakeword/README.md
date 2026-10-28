@@ -8,7 +8,7 @@ on the local NVIDIA GPU, inside WSL2.
 Open the Ubuntu (WSL) terminal and start:
 
 ```sh
-bash /mnt/c/path/to/voice-satellite/wakeword/train.sh
+bash /mnt/c/Users/nikla/source/mirra-wakeword/train.sh
 ```
 
 - The first run installs Python 3.10, PyTorch, TensorFlow and microWakeWord into `~/mirra-wakeword/venv`
@@ -26,10 +26,21 @@ When it is done, this folder contains:
 | `hey_mirra.json` | model manifest (ESPHome format), the cutoff is tuned afterwards from the test results |
 | `results/` | test results (false accepts per hour, recall), training log and parameters |
 
+## Your own recordings
+
+Real recordings of the people in the house help the most. Record a voice memo (phone or PC, any format ffmpeg
+reads: m4a, mp3, wav, ogg, ...) per person: say "Hey Mirra" 50-100 times with a pause of 1-2 seconds, at
+different distances, louder and quieter, faster and slower, the way you would really say it. Put the files into
+`recordings/` next to this script and start `train.sh` again.
+
+The script cuts the memos into single utterances (`recordings/segments/`, listen to a few to check) and uses
+each of them many times with different background noise and room echo. New or changed recordings are picked up
+automatically on the next run; only the features and the training are repeated.
+
 ## Stages
 
-1. **samples** – about 26,000 synthetic "Hey Mirra" samples (236 German and 500 English voices, mixed, with
-   different speed and variation) and 15,000 samples of look-alike phrases ("Mirra" alone, "Hey Mia",
+1. **samples** – about 36,000 synthetic "Hey Mirra" samples (all German Piper voices, 236 speakers in the
+   largest one, and 500 mixed English voices, with different speed and variation, also "Mirraa" / "Mira") and 15,000 samples of look-alike phrases ("Mirra" alone, "Hey Mia",
    "Hey Kira", "Hey Siri", "mir da", ...) that must *not* wake the speaker.
 2. **data** – room impulse responses, AudioSet and FMA background noise/music, and the negative feature sets of
    microWakeWord (speech, dinner party, no speech) from HuggingFace.

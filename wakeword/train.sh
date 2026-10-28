@@ -21,7 +21,7 @@ echo "=== $(date) start, work folder $WORK"
 
 # system tools
 missing=()
-for tool in git curl unzip tar; do command -v "$tool" >/dev/null || missing+=("$tool"); done
+for tool in git curl unzip tar ffmpeg; do command -v "$tool" >/dev/null || missing+=("$tool"); done
 if ((${#missing[@]})); then
   echo "Installing ${missing[*]} (sudo password needed)"
   sudo apt-get update && sudo apt-get install -y "${missing[@]}"
