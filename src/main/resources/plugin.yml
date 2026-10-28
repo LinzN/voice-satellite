@@ -1,0 +1,6 @@
+main: de.linzn.voicesatellite.VoiceSatellitePlugin
+name: voice-satellite
+version: ${project.version}
+depend: [ mirra ]
+buildJobName: ${buildServer.jobName}
+buildNumber: ${buildServer.buildNumber}
