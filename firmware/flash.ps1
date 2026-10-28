@@ -6,6 +6,7 @@
     .\flash.ps1 -Name "Küche" -Port COM5      USB, fixed port
     .\flash.ps1 -Name "Küche" -Ota 192.168.1.50   update over Wi-Fi (after the first USB flash)
     .\flash.ps1 -Monitor                      open the serial monitor after flashing
+    .\flash.ps1 -MonitorOnly                  only open the serial monitor
     .\flash.ps1 -Reconfigure                  ask for Wi-Fi, server and keys again
 
   The first run downloads arduino-cli, the ESP32 core and the NeoPixel library into .\tools (about 1.5 GB)
@@ -17,6 +18,7 @@ param(
     [string]$Port = "",
     [string]$Ota = "",
     [switch]$Monitor,
+    [switch]$MonitorOnly,
     [switch]$Reconfigure
 )
 
@@ -60,6 +62,32 @@ if (-not (Test-Path $coreDir)) {
 if (-not (Test-Path (Join-Path $env:ARDUINO_DIRECTORIES_USER "libraries\Adafruit_NeoPixel"))) {
     Step "Installing Adafruit NeoPixel"
     Arduino lib install "Adafruit NeoPixel"
+}
+
+function Find-Board {
+    $found = @()
+    $list = (& $cli board list --json | ConvertFrom-Json).detected_ports
+    foreach ($entry in $list) {
+        $p = $entry.port
+        if ($p.protocol -eq "serial" -and $p.properties.vid -match "303A") { $found += $p.address }
+    }
+    return ,$found
+}
+
+function Open-Monitor($port) {
+    # the board restarts after flashing and comes back as a new USB device; wait for it
+    for ($i = 0; $i -lt 20 -and -not $port; $i++) {
+        $ports = Find-Board
+        if ($ports.Count -gt 0) { $port = $ports[0] } else { Start-Sleep -Milliseconds 500 }
+    }
+    if (-not $port) { Fail "No board found for the serial monitor" }
+    Step "Serial monitor on $port (Ctrl+C to quit)"
+    & $cli monitor -p $port -c baudrate=115200
+}
+
+if ($MonitorOnly) {
+    Open-Monitor $Port
+    exit 0
 }
 
 # ------------------------------------------------------------------ settings
@@ -137,12 +165,7 @@ if ($Ota) {
 } else {
     if (-not $Port) {
         Step "Looking for the board"
-        $ports = @()
-        $list = (& $cli board list --json | ConvertFrom-Json).detected_ports
-        foreach ($entry in $list) {
-            $p = $entry.port
-            if ($p.protocol -eq "serial" -and $p.properties.vid -match "303A") { $ports += $p.address }
-        }
+        $ports = Find-Board
         if ($ports.Count -eq 0) {
             Fail ("No ESP32-S3 found. Connect the board by USB. If it still does not show up, hold the BOOT " +
                   "button while plugging it in.")
@@ -155,11 +178,19 @@ if ($Ota) {
         }
     }
     Step "Flashing over $Port"
-    Arduino upload --fqbn $fqbn -p $Port --input-dir $build $sketch
+    & $cli upload --fqbn $fqbn -p $Port --input-dir $build $sketch 2>&1 | Tee-Object -Variable uploadLog
+    if ($LASTEXITCODE -ne 0) {
+        # with the native USB port, the reset after flashing often fails although the firmware is written
+        if (($uploadLog | Out-String) -match "Hash of data verified") {
+            Write-Host "Firmware written; the automatic restart failed. If the LEDs stay dark, unplug and replug the board." -ForegroundColor Yellow
+        } else {
+            Fail "Flashing failed"
+        }
+    }
 }
 
 Write-Host "`nDone." -ForegroundColor Green
-if ($Monitor -and $Port) {
-    Step "Serial monitor (Ctrl+C to quit)"
-    & $cli monitor -p $Port -c baudrate=115200
+if ($Monitor) {
+    Start-Sleep -Seconds 2
+    Open-Monitor ""
 }
