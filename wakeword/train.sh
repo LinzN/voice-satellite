@@ -66,6 +66,21 @@ if [ ! -f venv/.installed ]; then
   touch venv/.installed
 fi
 python -c "import torch; print('PyTorch', torch.__version__, 'CUDA', torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else '')"
+deactivate
 
-python "$HERE/mww_train.py" --work "$WORK" --out "$HERE" "$@"
+# Separate environment for the training: TensorFlow brings its own CUDA 12 libraries, which clash with the
+# ones of PyTorch in the same environment (TensorFlow then does not find the GPU).
+if [ ! -f venv-tf/.installed ]; then
+  rm -rf venv-tf
+  uv venv -p 3.10 venv-tf
+  VIRTUAL_ENV="$WORK/venv-tf" uv pip install "tensorflow[and-cuda]>=2.18" tensorboard ai-edge-litert "numpy>=2,<3" \
+    "datasets==3.6.0" "audiomentations>=0.40" soundfile scipy tqdm pyyaml mmap_ninja pymicro-features webrtcvad-wheels \
+    "git+https://github.com/whatsnowplaying/audio-metadata@d4ebb238e6a401bb1a5aaaac60c9e2b3cb30929f"
+  VIRTUAL_ENV="$WORK/venv-tf" uv pip install --no-deps -e ./microWakeWord
+  touch venv-tf/.installed
+fi
+venv-tf/bin/python -c "import tensorflow as tf; print('TensorFlow', tf.__version__, 'GPU', tf.config.list_physical_devices('GPU'))" 2>&1 \
+  | grep -E "TensorFlow|Could not|Cannot|dlopen|\.so" || true
+
+venv/bin/python "$HERE/mww_train.py" --work "$WORK" --out "$HERE" --train-python "$WORK/venv-tf/bin/python" "$@"
 echo "=== $(date) done. Model: $HERE/hey_mirra.tflite"

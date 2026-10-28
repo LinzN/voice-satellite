@@ -324,7 +324,12 @@ def stage_features(work, args):
 
 # --------------------------------------------------------------------------- train
 
-def gpu_usable():
+TRAIN_ENV = dict(os.environ, TF_FORCE_GPU_ALLOW_GROWTH="true", TF_CPP_MIN_LOG_LEVEL="1",
+                 # RTX 50xx: TensorFlow compiles its kernels from PTX on the first start; keep them cached
+                 CUDA_CACHE_MAXSIZE="4294967296")
+
+
+def gpu_usable(python):
     test = ("import tensorflow as tf\n"
             "g = tf.config.list_physical_devices('GPU')\n"
             "assert g, 'no GPU'\n"
@@ -332,7 +337,9 @@ def gpu_usable():
             "y = tf.keras.layers.Conv2D(8, 3)(x)\n"
             "print('GPU ok', g, float(tf.reduce_sum(y)))\n")
     try:
-        result = subprocess.run([sys.executable, "-c", test], capture_output=True, text=True, timeout=3600)
+        log("Checking TensorFlow on the GPU (the first start can take a while)")
+        result = subprocess.run([python, "-c", test], capture_output=True, text=True, timeout=3600,
+                                env=dict(TRAIN_ENV, TF_CPP_MIN_LOG_LEVEL="0"))
         print(result.stdout[-2000:], result.stderr[-2000:])
         return result.returncode == 0
     except subprocess.TimeoutExpired:
@@ -378,13 +385,14 @@ def stage_train(work, args):
     config_path = work / "training_parameters.yaml"
     config_path.write_text(yaml.dump(config))
 
-    env = dict(os.environ, TF_FORCE_GPU_ALLOW_GROWTH="true", TF_CPP_MIN_LOG_LEVEL="1")
-    if args.smoke or args.cpu or not gpu_usable():
+    python = args.train_python or sys.executable
+    env = dict(TRAIN_ENV)
+    if args.smoke or args.cpu or not gpu_usable(python):
         log("Training on the CPU")
         env["CUDA_VISIBLE_DEVICES"] = "-1"
     else:
         log("Training on the GPU")
-    command = [sys.executable, "-m", "microwakeword.model_train_eval",
+    command = [python, "-m", "microwakeword.model_train_eval",
                f"--training_config={config_path}", "--train", "1", "--restore_checkpoint", "1",
                "--test_tf_nonstreaming", "0", "--test_tflite_nonstreaming", "0",
                "--test_tflite_nonstreaming_quantized", "0", "--test_tflite_streaming", "0",
@@ -448,6 +456,7 @@ def main():
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--smoke", action="store_true", help="tiny offline run to test the pipeline")
     parser.add_argument("--cpu", action="store_true", help="train on the CPU even if a GPU is available")
+    parser.add_argument("--train-python", help="Python of the TensorFlow environment used for training")
     parser.add_argument("--only", choices=["samples", "data", "features", "train", "export"])
     parser.add_argument("--positive-de", type=int, default=20000)
     parser.add_argument("--positive-en", type=int, default=6000)
