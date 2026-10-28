@@ -38,6 +38,11 @@ ADVERSARIAL_EN = [
     "Hey Nira", "Hey Ira", "here we go", "hey there", "Hey Emma", "Hey Mary", "hey me", "Hey Meera",
 ]
 
+# Look-alikes that turned out to be too close (or to contain the wake word): the samples are generated with the
+# full lists above (the file number decides the phrase) and these are removed afterwards.
+EXCLUDED_ADVERSARIAL = {"Hey Mira, nein", "Hey Miri", "Hey Meera"}
+MODEL_VERSION = "v2"
+
 HF = "https://huggingface.co/datasets"
 NEGATIVE_FEATURES = ["dinner_party.zip", "dinner_party_eval.zip", "no_speech.zip", "speech.zip"]
 GENERATORS = {
@@ -97,6 +102,32 @@ def generate(work, args, model, phrases, count, out_dir, max_speakers):
     run(command, env=env)
 
 
+def prune_adversarial(work):
+    """Remove samples of excluded look-alike phrases (file i was generated from phrase i % len(phrases))."""
+    removed = 0
+    for lang, phrases in (("de", ADVERSARIAL_DE), ("en", ADVERSARIAL_EN)):
+        folder = work / "samples" / "adversarial" / lang
+        bad = {i for i, phrase in enumerate(phrases) if phrase in EXCLUDED_ADVERSARIAL}
+        for wav in folder.glob("*.wav"):
+            if wav.stem.isdigit() and int(wav.stem) % len(phrases) in bad:
+                wav.unlink()
+                removed += 1
+    return removed
+
+
+def migrate(work):
+    """Bring the work folder of an earlier run up to the current model version without regenerating everything."""
+    marker = work / f".model-{MODEL_VERSION}"
+    if marker.exists() or not (work / "samples" / "adversarial").exists():
+        return
+    log(f"Updating the work folder to model {MODEL_VERSION}")
+    print(f"removed {prune_adversarial(work)} samples of excluded look-alike phrases")
+    shutil.rmtree(work / "features" / "adversarial", ignore_errors=True)
+    for stage in ("features", "train", "export"):
+        (work / f".done-{stage}").unlink(missing_ok=True)
+    marker.write_text("ok")
+
+
 def stage_samples(work, args):
     models = work / "generators"
     for lang, url in GENERATORS.items():
@@ -110,6 +141,8 @@ def stage_samples(work, args):
     generate(work, args, en, POSITIVE_PHRASES, args.positive_en, work / "samples" / "positive" / "en", 500)
     generate(work, args, de, ADVERSARIAL_DE, args.adversarial_de, work / "samples" / "adversarial" / "de", None)
     generate(work, args, en, ADVERSARIAL_EN, args.adversarial_en, work / "samples" / "adversarial" / "en", 500)
+    prune_adversarial(work)
+    (work / f".model-{MODEL_VERSION}").write_text("ok")
 
 
 # --------------------------------------------------------------------------- data
@@ -409,11 +442,11 @@ def stage_train(work, args):
     features = work / "features"
     config = {
         "window_step_ms": 10,
-        "train_dir": str(work / "trained_models" / "hey_mirra"),
+        "train_dir": str(work / "trained_models" / f"hey_mirra_{MODEL_VERSION}"),
         "features": [
             {"features_dir": str(features / "positive"), "sampling_weight": 2.0, "penalty_weight": 1.0, "truth": True,
              "truncation_strategy": "truncate_start", "type": "mmap"},
-            {"features_dir": str(features / "adversarial"), "sampling_weight": 3.0, "penalty_weight": 1.5,
+            {"features_dir": str(features / "adversarial"), "sampling_weight": 2.0, "penalty_weight": 1.0,
              "truth": False, "truncation_strategy": "truncate_start", "type": "mmap"},
             {"features_dir": str(subsets / "speech"), "sampling_weight": 10.0, "penalty_weight": 1.0,
              "truth": False, "truncation_strategy": "random", "type": "mmap"},
@@ -424,15 +457,17 @@ def stage_train(work, args):
             {"features_dir": str(negatives / "dinner_party_eval"), "sampling_weight": 0.0, "penalty_weight": 1.0,
              "truth": False, "truncation_strategy": "split", "type": "mmap"},
         ],
-        "training_steps": [args.steps],
-        "positive_class_weight": [1],
-        "negative_class_weight": [20],
-        "learning_rates": [0.001],
+        # second phase with a lower learning rate, so the model settles instead of jumping between
+        # "hears everything" and "hears nothing" from one validation to the next
+        "training_steps": [args.steps, args.steps // 2],
+        "positive_class_weight": [1, 1],
+        "negative_class_weight": [20, 20],
+        "learning_rates": [0.001, 0.0001],
         "batch_size": 128 if not args.smoke else 16,
-        "time_mask_max_size": [0],
-        "time_mask_count": [0],
-        "freq_mask_max_size": [0],
-        "freq_mask_count": [0],
+        "time_mask_max_size": [0, 0],
+        "time_mask_count": [0, 0],
+        "freq_mask_max_size": [0, 0],
+        "freq_mask_count": [0, 0],
         "eval_step_interval": 1000 if not args.smoke else 25,
         "clip_duration_ms": 1500,
         "target_minimization": 0.9,
@@ -476,7 +511,7 @@ def stage_train(work, args):
 # --------------------------------------------------------------------------- export
 
 def stage_export(work, out):
-    trained = work / "trained_models" / "hey_mirra"
+    trained = work / "trained_models" / f"hey_mirra_{MODEL_VERSION}"
     model = trained / "tflite_stream_state_internal_quant" / "stream_state_internal_quant.tflite"
     if not model.exists():
         raise SystemExit(f"No model at {model}")
@@ -526,7 +561,7 @@ def main():
     parser.add_argument("--adversarial-de", type=int, default=12000)
     parser.add_argument("--adversarial-en", type=int, default=3000)
     parser.add_argument("--batch-size", type=int, default=100)
-    parser.add_argument("--steps", type=int, default=25000)
+    parser.add_argument("--steps", type=int, default=20000, help="steps of the first phase, the second has half")
     parser.add_argument("--negative-gb", type=float, default=3.0,
                         help="RAM budget for the negative training sets (0 = use all, needs a lot of RAM)")
     parser.add_argument("--audioset-parts", type=int, default=2, help="number of AudioSet files for background noise")
@@ -541,6 +576,7 @@ def main():
     work.mkdir(parents=True, exist_ok=True)
     random.seed(7)
 
+    migrate(work)
     stages = [("samples", lambda: stage_samples(work, args)), ("data", lambda: stage_data(work, args)),
               ("features", lambda: stage_features(work, args)), ("train", lambda: stage_train(work, args)),
               ("export", lambda: stage_export(work, out))]
