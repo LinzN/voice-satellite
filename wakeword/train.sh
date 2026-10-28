@@ -80,7 +80,7 @@ if [ ! -f venv-tf/.installed ]; then
   VIRTUAL_ENV="$WORK/venv-tf" uv pip install --no-deps -e ./microWakeWord
   touch venv-tf/.installed
 fi
-venv-tf/bin/python -c "import tensorflow as tf; print('TensorFlow', tf.__version__, 'GPU', tf.config.list_physical_devices('GPU'))" 2>&1 \
+LD_LIBRARY_PATH="$(ls -d "$WORK"/venv-tf/lib/python3*/site-packages/nvidia/*/lib | paste -sd:)" venv-tf/bin/python -c "import tensorflow as tf; print('TensorFlow', tf.__version__, 'GPU', tf.config.list_physical_devices('GPU'))" 2>&1 \
   | grep -E "TensorFlow|Could not|Cannot|dlopen|\.so" || true
 
 venv/bin/python "$HERE/mww_train.py" --work "$WORK" --out "$HERE" --train-python "$WORK/venv-tf/bin/python" "$@"
