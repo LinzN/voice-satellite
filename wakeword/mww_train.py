@@ -82,7 +82,9 @@ def generate(work, args, model, phrases, count, out_dir, max_speakers):
         return
     text_file = out_dir.parent / (out_dir.name + ".txt")
     text_file.write_text("\n".join(phrases) + "\n", encoding="utf-8")
-    env = dict(os.environ, PYTHONPATH=str(work / "piper-sample-generator"))
+    # PYTORCH_JIT=0: the generator's TorchScript modules re-profile for every new input shape, which makes
+    # generation several times slower and fills the GPU memory; plain eager mode is much faster here
+    env = dict(os.environ, PYTHONPATH=str(work / "piper-sample-generator"), PYTORCH_JIT="0")
     command = [sys.executable, "-m", "piper_sample_generator", text_file,
                "--model", model, "--max-samples", count, "--batch-size", args.batch_size,
                "--length-scales", "0.7", "0.85", "1.0", "1.15", "1.3",
