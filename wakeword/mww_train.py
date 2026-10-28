@@ -54,7 +54,10 @@ NEGATIVE_FEATURES = ["dinner_party.zip", "dinner_party_eval.zip", "no_speech.zip
 GENERATORS = {
     "en": "https://github.com/rhasspy/piper-sample-generator/releases/download/v2.0.0/en_US-libritts_r-medium.pt",
 }
-GERMAN_VOICE_SHARE = {"mls": 0.55}  # the 236-speaker voice gets this share, the other voices split the rest
+GERMAN_VOICE_SHARE = {}  # optional larger share for single voices, the others split the rest
+# de_DE-mls-medium is trained on the same data as the German generator and has the same problem:
+# median 3 s, up to 14 s for "Hey Mirra"
+EXCLUDED_VOICES = ("mls",)
 
 
 def log(message):
@@ -162,7 +165,10 @@ def german_voices(work, args):
 def generate_german(work, args, phrases, total, out_root):
     """Generate with every German voice in parallel processes, the multi-speaker voice gets the largest share."""
     from concurrent.futures import ThreadPoolExecutor
-    voices = german_voices(work, args)
+    voices = [v for v in german_voices(work, args) if not any(key in v.stem for key in EXCLUDED_VOICES)]
+    for folder in out_root.glob("*"):
+        if folder.is_dir() and any(key in folder.name for key in EXCLUDED_VOICES):
+            shutil.rmtree(folder)
     print("German voices: " + ", ".join(v.stem for v in voices), flush=True)
     big = [v for v in voices if any(key in v.stem for key in GERMAN_VOICE_SHARE)]
     rest = [v for v in voices if v not in big]
