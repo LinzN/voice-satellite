@@ -226,6 +226,9 @@ public final class SatelliteConnection implements Runnable {
         String name = event.optString("event", "");
         switch (name) {
             case "listen_start" -> {
+                if (event.optBoolean("wake", false)) {
+                    this.plugin.getPluginLogger().debug("Wake word on " + this.deviceId);
+                }
                 this.generation.incrementAndGet();
                 this.detector = new SpeechDetector(this.config);
                 this.recording = new ByteArrayOutputStream();

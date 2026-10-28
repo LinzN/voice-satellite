@@ -1,0 +1,2 @@
+kissfft by Mark Borgerding, BSD-3-Clause (see the header of kiss_fft.h).
+The micro frontend files are from TensorFlow Lite Micro via pymicro-features, Apache-2.0 (LICENSE.tensorflow).

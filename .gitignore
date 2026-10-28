@@ -3,3 +3,8 @@
 *.iml
 /firmware/**/config.h
 /firmware/**/build/
+/firmware/**/hey_mirra_model.h
+/wakeword/*.tflite
+/wakeword/hey_mirra*
+/wakeword/results/
+/wakeword/*.log

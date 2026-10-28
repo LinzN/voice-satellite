@@ -31,3 +31,11 @@
 
 /* LED brightness 0..255 */
 #define LED_BRIGHTNESS 160
+
+/* Wake word "Hey Mirra" (needs hey_mirra_model.h next to the sketch, see "Wake word" in the README).
+ * Tapping the center pad works in any case. */
+#define WAKE_WORD_ENABLED 1
+/* higher = fewer false wake ups, but you may have to speak more clearly (0.5 .. 0.99) */
+#define WAKE_WORD_CUTOFF 0.90f
+/* number of model outputs (30 ms each) that are averaged */
+#define WAKE_WORD_WINDOW 5

@@ -19,14 +19,16 @@ The speaker hardware keeps working: speaker, microphone, the six LEDs, the three
 
 | Action | What happens |
 |---|---|
+| Say **"Hey Mirra"** | Mirra listens right away (no beep, just keep talking: "Hey Mirra, mach das Licht im Flur an") |
 | Tap the center | Short beep, Mirra listens. Stop talking and she answers on her own (end of speech is detected) |
 | Tap the center while listening | Stops listening right away |
 | Tap the center while Mirra speaks | Interrupts her and listens again |
 | Tap the center while Mirra thinks | Cancels the question |
 | Tap left / right | Volume down / up (stored on the device) |
-| Mute switch | Microphone off; the speaker still plays announcements |
+| Mute switch | Microphone off (also the wake word); the speaker still plays announcements |
 
-If Mirra's answer ends with a question, the speaker listens again by itself.
+If Mirra's answer ends with a question, the speaker listens again by itself. While the speaker plays, it does not
+react to the wake word (no echo cancellation on the board), tap to interrupt.
 
 | LEDs | Meaning |
 |---|---|
@@ -83,30 +85,56 @@ The sketch is in [`firmware/mirra-voice`](firmware/mirra-voice).
 
 1. Copy `config.example.h` to `config.h` and set Wi-Fi, `SERVER_HOST` (fixed IP of STEM), `DEVICE_KEY`
    (the `server.deviceKey` from above), optionally `DEVICE_NAME` and `OTA_PASSWORD`.
-2. Arduino IDE: install the **esp32** board package by Espressif (3.x) and the library **Adafruit NeoPixel**.
-   Board **ESP32S3 Dev Module**, **USB CDC On Boot: Enabled**, **PSRAM: OPI PSRAM**, other settings default.
-3. Connect the board by USB (hold BOOT while plugging in if it does not show up) and upload.
+2. Optional: copy `hey_mirra_model.h` (from the wake word training, see below) next to `mirra-voice.ino`.
+   Without it the firmware works with tapping only.
+3. Arduino IDE: install the **esp32** board package by Espressif (3.x) and the library **Adafruit NeoPixel**.
+   Board **ESP32S3 Dev Module**, **USB CDC On Boot: Enabled**, **PSRAM: OPI PSRAM**,
+   **Partition Scheme: Minimal SPIFFS (1.9MB APP with OTA)** (the wake word does not fit the default scheme).
+4. Connect the board by USB (hold BOOT while plugging in if it does not show up) and upload.
 
 With arduino-cli:
 
 ```sh
 arduino-cli core install esp32:esp32
 arduino-cli lib install "Adafruit NeoPixel"
-arduino-cli compile --fqbn esp32:esp32:esp32s3:CDCOnBoot=cdc,PSRAM=opi firmware/mirra-voice
-arduino-cli upload  --fqbn esp32:esp32:esp32s3:CDCOnBoot=cdc,PSRAM=opi -p /dev/ttyACM0 firmware/mirra-voice
+arduino-cli compile --fqbn esp32:esp32:esp32s3:CDCOnBoot=cdc,PSRAM=opi,PartitionScheme=min_spiffs firmware/mirra-voice
+arduino-cli upload  --fqbn esp32:esp32:esp32s3:CDCOnBoot=cdc,PSRAM=opi,PartitionScheme=min_spiffs -p /dev/ttyACM0 firmware/mirra-voice
 ```
 
-Later updates work over Wi-Fi (Arduino OTA, host name `mirra-voice-xxxxxx`, password `OTA_PASSWORD`).
+The partition scheme can only be changed over USB; later updates work over Wi-Fi (Arduino OTA, host name `mirra-voice-xxxxxx`, password `OTA_PASSWORD`).
 
 Settings in `config.h` you may need to adjust:
 
 - `TOUCH_SENSITIVITY` if taps are missed (lower) or trigger by themselves (higher). The pads calibrate at
   start, so do not touch the speaker while it boots.
+- `WAKE_WORD_CUTOFF` (default `0.90`): raise it if the speaker wakes up by itself, lower it if it does not react
+  to "Hey Mirra". `WAKE_WORD_ENABLED 0` turns the wake word off.
 - `MUTE_ACTIVE_LEVEL` if the mute switch works the wrong way round (`0`), or set `-1` to ignore it.
 
 The serial monitor (115200 baud) shows the device id, Wi-Fi and connection state.
 
-### 3. Mirra
+### 3. Wake word "Hey Mirra"
+
+The wake word runs on the speaker itself: a [microWakeWord](https://github.com/kahrendt/microWakeWord) model
+(TFLite Micro, about 60 KB) listens to the microphone while the speaker is idle. Nothing leaves the device until
+the wake word is detected.
+
+The model is trained on a PC with an NVIDIA GPU with the scripts in [`wakeword/`](wakeword): synthetic
+"Hey Mirra" samples from German and English voices, look-alike phrases that must not wake it ("Mirra" alone,
+"Hey Mia", "Hey Kira", "Hey Siri", ...), background noise and speech. In WSL2:
+
+```sh
+bash wakeword/train.sh
+```
+
+It takes a few hours and writes `hey_mirra_model.h` (copy it to `firmware/mirra-voice/`) and the test results
+(`results/tflite_streaming_roc.txt`: false wake ups per hour and missed wake words for each cutoff, use them to
+choose `WAKE_WORD_CUTOFF`). See [`wakeword/README.md`](wakeword/README.md).
+
+The model is not in this repository: the background datasets it is trained with are for personal,
+non-commercial use only.
+
+### 4. Mirra
 
 The first time somebody speaks on a new device, the owner gets Mirra's usual access request
 (*"🔔 Neue Kontaktanfrage an Mirra – Sprachgerät: Küche (mirra-voice-a1b2c3) – Erste Nachricht: …"*); the speaker

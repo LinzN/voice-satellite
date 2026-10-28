@@ -1,0 +1,430 @@
+#!/usr/bin/env python3
+"""
+Train the "Hey Mirra" wake word for the Mirra voice satellites with microWakeWord.
+
+Stages (each one is skipped when its marker file exists, so the script can be restarted):
+  samples   synthetic wake word and look-alike phrases with German and English Piper generators
+  data      download room impulse responses, background noise and the negative feature sets
+  features  augment the samples and compute the spectrogram features
+  train     train the model and convert it to a quantized streaming TFLite model
+  export    copy the model, the test results and a manifest into the output folder
+
+Usage: python mww_train.py --work ~/mirra-wakeword --out /mnt/c/.../mirra-wakeword [--smoke]
+"""
+
+import argparse
+import json
+import os
+import random
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+POSITIVE_PHRASES = ["Hey Mirra", "Hey Mirra!", "Hey, Mirra.", "Hei Mirra", "Hey Mirra?", "hey mirra"]
+
+# Phrases that sound close to the wake word or are said often in the house. The model learns to stay quiet
+# for them; "Mirra" alone is included on purpose, so talking *about* Mirra does not wake her.
+ADVERSARIAL_DE = [
+    "Mirra", "Mirra, hörst du?", "Mira", "Hey", "Hey du", "Hey Mia", "Hey Emma", "Hey Lina", "Hey Pia",
+    "Hey Marie", "Hey Miriam", "Hey Kira", "Hey Lara", "Hey Klara", "Hey Ida", "Hey Vera", "Hey Merle",
+    "Hey Mama", "Hey Mila", "Hey Nina", "Hey Tim", "Hey Siri", "Alexa", "Hey Google", "hey mir da",
+    "hey mit dir", "hier da", "mir da", "Kamera", "Hey Leute", "Hey Jungs", "hey wie geht's", "ihr da",
+    "Hey Pierre", "Hey Hilda", "Hey Mira, nein", "Himmel", "Mitra", "Herr Mirr", "ey Bruder", "Hey Miri",
+]
+ADVERSARIAL_EN = [
+    "Mirra", "Hey", "Hey Siri", "Hey Google", "Alexa", "Hey Mia", "Hey Kira", "Mirror", "Hey Mister",
+    "Hey Nira", "Hey Ira", "here we go", "hey there", "Hey Emma", "Hey Mary", "hey me", "Hey Meera",
+]
+
+HF = "https://huggingface.co/datasets"
+NEGATIVE_FEATURES = ["dinner_party.zip", "dinner_party_eval.zip", "no_speech.zip", "speech.zip"]
+GENERATORS = {
+    "de": "https://github.com/rhasspy/piper-sample-generator/releases/download/v2.0.0/de_DE-mls-medium.pt",
+    "en": "https://github.com/rhasspy/piper-sample-generator/releases/download/v2.0.0/en_US-libritts_r-medium.pt",
+}
+
+
+def log(message):
+    print(f"\n[{time.strftime('%H:%M:%S')}] === {message}", flush=True)
+
+
+def run(command, **kwargs):
+    print("+ " + " ".join(str(c) for c in command), flush=True)
+    subprocess.run([str(c) for c in command], check=True, **kwargs)
+
+
+def done(work, stage):
+    return (work / f".done-{stage}").exists()
+
+
+def mark(work, stage):
+    (work / f".done-{stage}").write_text(time.strftime("%Y-%m-%d %H:%M:%S"))
+
+
+def download(url, target):
+    if target.exists() and target.stat().st_size > 0 and not (target.parent / (target.name + ".part")).exists():
+        return
+    part = target.parent / (target.name + ".part")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    run(["curl", "-L", "--fail", "--retry", "5", "-C", "-", "-o", part, url])
+    part.rename(target)
+
+
+# --------------------------------------------------------------------------- samples
+
+def generate(work, args, model, phrases, count, out_dir, max_speakers):
+    out_dir.mkdir(parents=True, exist_ok=True)
+    existing = len(list(out_dir.glob("*.wav")))
+    if existing >= count:
+        print(f"{out_dir}: {existing} samples present")
+        return
+    text_file = out_dir.parent / (out_dir.name + ".txt")
+    text_file.write_text("\n".join(phrases) + "\n", encoding="utf-8")
+    env = dict(os.environ, PYTHONPATH=str(work / "piper-sample-generator"))
+    command = [sys.executable, "-m", "piper_sample_generator", text_file,
+               "--model", model, "--max-samples", count, "--batch-size", args.batch_size,
+               "--length-scales", "0.7", "0.85", "1.0", "1.15", "1.3",
+               "--noise-scales", "0.4", "0.667", "0.9",
+               "--noise-scale-ws", "0.5", "0.8", "1.0",
+               "--slerp-weights", "0.0", "0.3", "0.5", "0.7", "1.0",
+               "--output-dir", out_dir]
+    if max_speakers:
+        command += ["--max-speakers", max_speakers]
+    run(command, env=env)
+
+
+def stage_samples(work, args):
+    models = work / "generators"
+    for lang, url in GENERATORS.items():
+        name = url.rsplit("/", 1)[1]
+        download(url, models / name)
+        source_json = work / "piper-sample-generator" / "models" / (name + ".json")
+        shutil.copy(source_json, models / (name + ".json"))
+    de = models / "de_DE-mls-medium.pt"
+    en = models / "en_US-libritts_r-medium.pt"
+    generate(work, args, de, POSITIVE_PHRASES, args.positive_de, work / "samples" / "positive" / "de", None)
+    generate(work, args, en, POSITIVE_PHRASES, args.positive_en, work / "samples" / "positive" / "en", 500)
+    generate(work, args, de, ADVERSARIAL_DE, args.adversarial_de, work / "samples" / "adversarial" / "de", None)
+    generate(work, args, en, ADVERSARIAL_EN, args.adversarial_en, work / "samples" / "adversarial" / "en", 500)
+
+
+# --------------------------------------------------------------------------- data
+
+def write_wav(path, samples, rate=16000):
+    import numpy as np
+    import scipy.io.wavfile
+    scipy.io.wavfile.write(path, rate, (np.clip(samples, -1, 1) * 32767).astype(np.int16))
+
+
+def convert_folder(source_glob_root, pattern, target):
+    """Convert audio files to 16 kHz mono WAV."""
+    import numpy as np
+    import soundfile
+    from scipy.signal import resample_poly
+    from math import gcd
+    from tqdm import tqdm
+    target.mkdir(parents=True, exist_ok=True)
+    files = list(Path(source_glob_root).glob(pattern))
+    for file in tqdm(files, desc=f"converting {target.name}"):
+        out = target / (file.stem + ".wav")
+        if out.exists():
+            continue
+        try:
+            audio, rate = soundfile.read(str(file), dtype="float32", always_2d=True)
+        except Exception as error:  # broken or unsupported file: skip it
+            print(f"skip {file.name}: {error}")
+            continue
+        audio = audio.mean(axis=1)
+        if rate != 16000:
+            divisor = gcd(rate, 16000)
+            audio = resample_poly(audio, 16000 // divisor, rate // divisor)
+        write_wav(out, audio)
+
+
+def stage_data(work, args):
+    import numpy as np
+    data = work / "data"
+    data.mkdir(exist_ok=True)
+    if args.smoke:
+        # offline stand-ins: colored noise as background, decaying noise bursts as room impulses
+        rng = np.random.default_rng(1)
+        for folder in ("background_16k", "mit_rirs"):
+            (data / folder).mkdir(exist_ok=True)
+        for i in range(20):
+            noise = np.cumsum(rng.normal(0, 1, 16000 * 10)) * 0.001
+            noise = noise - np.convolve(noise, np.ones(400) / 400, mode="same")
+            write_wav(data / "background_16k" / f"noise{i}.wav", noise * 0.3 + rng.normal(0, 0.02, noise.size))
+            impulse = rng.normal(0, 1, 4000) * np.exp(-np.arange(4000) / (300 + 100 * i))
+            write_wav(data / "mit_rirs" / f"rir{i}.wav", impulse / np.abs(impulse).max())
+        return
+
+    # room impulse responses
+    rir = data / "mit_rirs"
+    if not rir.exists() or not any(rir.iterdir()):
+        import datasets
+        rir.mkdir(exist_ok=True)
+        dataset = datasets.load_dataset("davidscripka/MIT_environmental_impulse_responses", split="train", streaming=True)
+        for row in dataset:
+            name = row["audio"]["path"].split("/")[-1]
+            write_wav(rir / name, np.asarray(row["audio"]["array"]), 16000)
+
+    # background noise: two AudioSet parts and the FMA music set
+    for part in args.audioset_parts:
+        tar = data / "audioset" / part
+        download(f"{HF}/agkphysics/AudioSet/resolve/main/data/{part}", tar)
+        stamp = data / "audioset" / (part + ".extracted")
+        if not stamp.exists():
+            run(["tar", "-xf", tar, "-C", data / "audioset"])
+            stamp.write_text("ok")
+    convert_folder(data / "audioset" / "audio", "**/*.flac", data / "background_16k")
+    fma = data / "fma" / "fma_xs.zip"
+    download(f"{HF}/mchl914/fma_xsmall/resolve/main/fma_xs.zip", fma)
+    if not (data / "fma" / ".extracted").exists():
+        run(["unzip", "-q", "-o", fma, "-d", data / "fma"])
+        (data / "fma" / ".extracted").write_text("ok")
+    convert_folder(data / "fma", "**/*.mp3", data / "fma_16k")
+
+    # negative spectrogram features prepared for microWakeWord
+    negatives = work / "negative_datasets"
+    for name in NEGATIVE_FEATURES:
+        archive = negatives / name
+        download(f"{HF}/kahrendt/microwakeword/resolve/main/{name}", archive)
+        stamp = negatives / (name + ".extracted")
+        if not stamp.exists():
+            run(["unzip", "-q", "-o", archive, "-d", negatives])
+            stamp.write_text("ok")
+
+
+# --------------------------------------------------------------------------- features
+
+def make_features(clips_dir, out_dir, name, background, rirs):
+    from microwakeword.audio.augmentation import Augmentation
+    from microwakeword.audio.clips import Clips
+    from microwakeword.audio.spectrograms import SpectrogramGeneration
+    from mmap_ninja.ragged import RaggedMmap
+
+    clips = Clips(input_directory=str(clips_dir), file_pattern="**/*.wav", max_clip_duration_s=None,
+                  remove_silence=False, random_split_seed=10, split_count=0.1)
+    augmenter = Augmentation(
+        augmentation_duration_s=3.2,
+        augmentation_probabilities={
+            "SevenBandParametricEQ": 0.1, "TanhDistortion": 0.1, "PitchShift": 0.1, "BandStopFilter": 0.1,
+            "AddColorNoise": 0.1, "AddBackgroundNoise": 0.75, "Gain": 1.0, "RIR": 0.5,
+        },
+        impulse_paths=[str(rirs)],
+        background_paths=[str(b) for b in background],
+        background_min_snr_db=-5, background_max_snr_db=10,
+        min_jitter_s=0.195, max_jitter_s=0.205,
+    )
+    for split, split_name, repeat, slide in (("training", "train", 2, 10), ("validation", "validation", 1, 10),
+                                             ("testing", "test", 1, 1)):
+        target = out_dir / split / f"{name}_mmap"
+        if target.exists():
+            continue
+        (out_dir / split).mkdir(parents=True, exist_ok=True)
+        spectrograms = SpectrogramGeneration(clips=clips, augmenter=augmenter, slide_frames=slide, step_ms=10)
+        RaggedMmap.from_generator(out_dir=str(target),
+                                  sample_generator=spectrograms.spectrogram_generator(split=split_name, repeat=repeat),
+                                  batch_size=100, verbose=True)
+
+
+def smoke_negatives(work):
+    """Offline stand-in for the downloaded negative feature sets: features of noise clips."""
+    import numpy as np
+    from mmap_ninja.ragged import RaggedMmap
+    from pymicro_features import MicroFrontend  # noqa: F401  (ensures the frontend is installed)
+    from microwakeword.audio.audio_utils import generate_features_for_clip
+    rng = np.random.default_rng(2)
+    negatives = work / "negative_datasets"
+
+    def clips(n, seconds):
+        for _ in range(n):
+            audio = rng.normal(0, 0.05, 16000 * seconds)
+            yield generate_features_for_clip((audio * 32767).astype(np.int16), step_ms=10)
+
+    for name in ("speech", "dinner_party", "no_speech"):
+        for split in ("training", "validation", "testing"):
+            target = negatives / name / split / "smoke_mmap"
+            if not target.exists():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                RaggedMmap.from_generator(out_dir=str(target), sample_generator=clips(40, 3), batch_size=20)
+    for split in ("validation_ambient", "testing_ambient"):
+        target = negatives / "dinner_party_eval" / split / "smoke_mmap"
+        if not target.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            RaggedMmap.from_generator(out_dir=str(target), sample_generator=clips(3, 60), batch_size=3)
+
+
+def stage_features(work, args):
+    data = work / "data"
+    background = [p for p in (data / "background_16k", data / "fma_16k") if p.exists()]
+    make_features(work / "samples" / "positive", work / "features" / "positive", "wakeword", background, data / "mit_rirs")
+    make_features(work / "samples" / "adversarial", work / "features" / "adversarial", "adversarial", background,
+                  data / "mit_rirs")
+    if args.smoke:
+        smoke_negatives(work)
+
+
+# --------------------------------------------------------------------------- train
+
+def gpu_usable():
+    test = ("import tensorflow as tf\n"
+            "g = tf.config.list_physical_devices('GPU')\n"
+            "assert g, 'no GPU'\n"
+            "x = tf.random.normal([1, 49, 40, 1])\n"
+            "y = tf.keras.layers.Conv2D(8, 3)(x)\n"
+            "print('GPU ok', g, float(tf.reduce_sum(y)))\n")
+    try:
+        result = subprocess.run([sys.executable, "-c", test], capture_output=True, text=True, timeout=3600)
+        print(result.stdout[-2000:], result.stderr[-2000:])
+        return result.returncode == 0
+    except subprocess.TimeoutExpired:
+        return False
+
+
+def stage_train(work, args):
+    import yaml
+    negatives = work / "negative_datasets"
+    features = work / "features"
+    config = {
+        "window_step_ms": 10,
+        "train_dir": str(work / "trained_models" / "hey_mirra"),
+        "features": [
+            {"features_dir": str(features / "positive"), "sampling_weight": 2.0, "penalty_weight": 1.0, "truth": True,
+             "truncation_strategy": "truncate_start", "type": "mmap"},
+            {"features_dir": str(features / "adversarial"), "sampling_weight": 3.0, "penalty_weight": 1.5,
+             "truth": False, "truncation_strategy": "truncate_start", "type": "mmap"},
+            {"features_dir": str(negatives / "speech"), "sampling_weight": 10.0, "penalty_weight": 1.0,
+             "truth": False, "truncation_strategy": "random", "type": "mmap"},
+            {"features_dir": str(negatives / "dinner_party"), "sampling_weight": 10.0, "penalty_weight": 1.0,
+             "truth": False, "truncation_strategy": "random", "type": "mmap"},
+            {"features_dir": str(negatives / "no_speech"), "sampling_weight": 5.0, "penalty_weight": 1.0,
+             "truth": False, "truncation_strategy": "random", "type": "mmap"},
+            {"features_dir": str(negatives / "dinner_party_eval"), "sampling_weight": 0.0, "penalty_weight": 1.0,
+             "truth": False, "truncation_strategy": "split", "type": "mmap"},
+        ],
+        "training_steps": [args.steps],
+        "positive_class_weight": [1],
+        "negative_class_weight": [20],
+        "learning_rates": [0.001],
+        "batch_size": 128 if not args.smoke else 16,
+        "time_mask_max_size": [0],
+        "time_mask_count": [0],
+        "freq_mask_max_size": [0],
+        "freq_mask_count": [0],
+        "eval_step_interval": 500 if not args.smoke else 25,
+        "clip_duration_ms": 1500,
+        "target_minimization": 0.9,
+        "minimization_metric": None,
+        "maximization_metric": "average_viable_recall",
+    }
+    config_path = work / "training_parameters.yaml"
+    config_path.write_text(yaml.dump(config))
+
+    env = dict(os.environ, TF_FORCE_GPU_ALLOW_GROWTH="true", TF_CPP_MIN_LOG_LEVEL="1")
+    if args.smoke or args.cpu or not gpu_usable():
+        log("Training on the CPU")
+        env["CUDA_VISIBLE_DEVICES"] = "-1"
+    else:
+        log("Training on the GPU")
+    command = [sys.executable, "-m", "microwakeword.model_train_eval",
+               f"--training_config={config_path}", "--train", "1", "--restore_checkpoint", "1",
+               "--test_tf_nonstreaming", "0", "--test_tflite_nonstreaming", "0",
+               "--test_tflite_nonstreaming_quantized", "0", "--test_tflite_streaming", "0",
+               "--test_tflite_streaming_quantized", "1", "--use_weights", "best_weights",
+               "mixednet", "--pointwise_filters", "64,64,64,64", "--repeat_in_block", "1, 1, 1, 1",
+               "--mixconv_kernel_sizes", "[5], [7,11], [9,15], [23]", "--residual_connection", "0,0,0,0",
+               "--first_conv_filters", "32", "--first_conv_kernel_size", "5", "--stride", "3"]
+    with open(work / "training.log", "a", encoding="utf-8") as logfile:
+        process = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                   cwd=work)
+        for line in process.stdout:
+            print(line, end="", flush=True)
+            logfile.write(line)
+        if process.wait() != 0:
+            raise SystemExit("Training failed, see training.log")
+
+
+# --------------------------------------------------------------------------- export
+
+def stage_export(work, out):
+    trained = work / "trained_models" / "hey_mirra"
+    model = trained / "tflite_stream_state_internal_quant" / "stream_state_internal_quant.tflite"
+    if not model.exists():
+        raise SystemExit(f"No model at {model}")
+    out.mkdir(parents=True, exist_ok=True)
+    shutil.copy(model, out / "hey_mirra.tflite")
+    results = out / "results"
+    results.mkdir(exist_ok=True)
+    for file in trained.rglob("*.txt"):
+        shutil.copy(file, results / file.name)
+    for name in ("training.log", "training_parameters.yaml"):
+        if (work / name).exists():
+            shutil.copy(work / name, results / name)
+    manifest = {
+        "type": "micro", "wake_word": "Hey Mirra", "author": "MirraNET", "website": "https://mirranet.de",
+        "model": "hey_mirra.tflite", "trained_languages": ["de", "en"], "version": 2,
+        "micro": {"probability_cutoff": 0.9, "sliding_window_size": 5, "feature_step_size": 10,
+                  "tensor_arena_size": 30000, "minimum_esphome_version": "2024.7.0"},
+    }
+    (out / "hey_mirra.json").write_text(json.dumps(manifest, indent=2))
+    write_header(out / "hey_mirra.tflite", out / "hey_mirra_model.h")
+    log(f"Model written to {out / 'hey_mirra.tflite'}")
+
+
+def write_header(model, header):
+    """C array of the model for the firmware (copy next to mirra-voice.ino)."""
+    data = model.read_bytes()
+    lines = [", ".join(f"0x{b:02x}" for b in data[i:i + 16]) for i in range(0, len(data), 16)]
+    header.write_text(
+        "// Wake word model \"Hey Mirra\" (microWakeWord), generated by mww_train.py\n"
+        "#pragma once\n\n"
+        "alignas(16) const unsigned char hey_mirra_tflite[] = {\n  " + ",\n  ".join(lines) + "\n};\n"
+        f"const unsigned int hey_mirra_tflite_len = {len(data)};\n")
+
+
+# --------------------------------------------------------------------------- main
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--work", type=Path, required=True)
+    parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--smoke", action="store_true", help="tiny offline run to test the pipeline")
+    parser.add_argument("--cpu", action="store_true", help="train on the CPU even if a GPU is available")
+    parser.add_argument("--only", choices=["samples", "data", "features", "train", "export"])
+    parser.add_argument("--positive-de", type=int, default=20000)
+    parser.add_argument("--positive-en", type=int, default=6000)
+    parser.add_argument("--adversarial-de", type=int, default=12000)
+    parser.add_argument("--adversarial-en", type=int, default=3000)
+    parser.add_argument("--batch-size", type=int, default=100)
+    parser.add_argument("--steps", type=int, default=30000)
+    parser.add_argument("--audioset-parts", nargs="+", default=["bal_train09.tar", "bal_train08.tar"])
+    args = parser.parse_args()
+    if args.smoke:
+        args.positive_de, args.positive_en, args.adversarial_de, args.adversarial_en = 60, 20, 40, 10
+        args.batch_size, args.steps = 10, 60
+
+    work = args.work.expanduser().resolve()
+    out = args.out.expanduser().resolve()
+    work.mkdir(parents=True, exist_ok=True)
+    random.seed(7)
+
+    stages = [("samples", lambda: stage_samples(work, args)), ("data", lambda: stage_data(work, args)),
+              ("features", lambda: stage_features(work, args)), ("train", lambda: stage_train(work, args)),
+              ("export", lambda: stage_export(work, out))]
+    for name, function in stages:
+        if args.only and name != args.only:
+            continue
+        if done(work, name) and not args.only:
+            print(f"stage {name}: already done")
+            continue
+        log(f"Stage {name}")
+        function()
+        mark(work, name)
+    log("Finished")
+
+
+if __name__ == "__main__":
+    main()
