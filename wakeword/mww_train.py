@@ -346,9 +346,66 @@ def gpu_usable(python):
         return False
 
 
+def dir_size(path):
+    return sum(f.stat().st_size for f in Path(path).rglob("*") if f.is_file())
+
+
+def subset_negatives(work, budget_gb):
+    """
+    The training reads random spectrograms from all feature sets. When they do not fit into the RAM, every
+    step waits for the disk. The large negative training sets are therefore reduced to a random subset that
+    fits into the given budget; validation and test sets are used as they are.
+    """
+    import numpy as np
+    from mmap_ninja.ragged import RaggedMmap
+    source_root = work / "negative_datasets"
+    target_root = work / "negative_subsets"
+    shares = {"speech": 0.4, "dinner_party": 0.4, "no_speech": 0.2}
+    rng = np.random.default_rng(3)
+    for name, share in shares.items():
+        source = source_root / name
+        target = target_root / name
+        for split in source.iterdir():
+            if not split.is_dir():
+                continue
+            link = target / split.name
+            if split.name != "training":
+                if not link.exists():
+                    link.parent.mkdir(parents=True, exist_ok=True)
+                    link.symlink_to(split, target_is_directory=True)
+                continue
+            limit = budget_gb * share * 1024 ** 3
+            total = dir_size(split)
+            stamp = target / f".training-{budget_gb}"
+            if stamp.exists():
+                continue
+            if link.is_symlink():
+                link.unlink()
+            elif link.exists():
+                shutil.rmtree(link)
+            if total <= limit:
+                link.parent.mkdir(parents=True, exist_ok=True)
+                link.symlink_to(split, target_is_directory=True)
+            else:
+                fraction = limit / total
+                print(f"{name}: using {fraction:.0%} of {total / 1024 ** 3:.1f} GB", flush=True)
+                link.mkdir(parents=True, exist_ok=True)
+                for number, mmap_path in enumerate(sorted(split.glob("**/*_mmap"))):
+                    features = RaggedMmap(str(mmap_path))
+                    count = max(1, int(len(features) * fraction))
+                    indices = np.sort(rng.choice(len(features), size=count, replace=False))
+                    RaggedMmap.from_generator(out_dir=str(link / f"subset{number}_mmap"),
+                                              sample_generator=(features[int(i)] for i in indices),
+                                              batch_size=1000, verbose=True)
+            target.mkdir(parents=True, exist_ok=True)
+            stamp.write_text("ok")
+    return target_root
+
+
 def stage_train(work, args):
     import yaml
     negatives = work / "negative_datasets"
+    subsets = subset_negatives(work, args.negative_gb) if args.negative_gb > 0 else negatives
     features = work / "features"
     config = {
         "window_step_ms": 10,
@@ -358,11 +415,11 @@ def stage_train(work, args):
              "truncation_strategy": "truncate_start", "type": "mmap"},
             {"features_dir": str(features / "adversarial"), "sampling_weight": 3.0, "penalty_weight": 1.5,
              "truth": False, "truncation_strategy": "truncate_start", "type": "mmap"},
-            {"features_dir": str(negatives / "speech"), "sampling_weight": 10.0, "penalty_weight": 1.0,
+            {"features_dir": str(subsets / "speech"), "sampling_weight": 10.0, "penalty_weight": 1.0,
              "truth": False, "truncation_strategy": "random", "type": "mmap"},
-            {"features_dir": str(negatives / "dinner_party"), "sampling_weight": 10.0, "penalty_weight": 1.0,
+            {"features_dir": str(subsets / "dinner_party"), "sampling_weight": 10.0, "penalty_weight": 1.0,
              "truth": False, "truncation_strategy": "random", "type": "mmap"},
-            {"features_dir": str(negatives / "no_speech"), "sampling_weight": 5.0, "penalty_weight": 1.0,
+            {"features_dir": str(subsets / "no_speech"), "sampling_weight": 5.0, "penalty_weight": 1.0,
              "truth": False, "truncation_strategy": "random", "type": "mmap"},
             {"features_dir": str(negatives / "dinner_party_eval"), "sampling_weight": 0.0, "penalty_weight": 1.0,
              "truth": False, "truncation_strategy": "split", "type": "mmap"},
@@ -376,7 +433,7 @@ def stage_train(work, args):
         "time_mask_count": [0],
         "freq_mask_max_size": [0],
         "freq_mask_count": [0],
-        "eval_step_interval": 500 if not args.smoke else 25,
+        "eval_step_interval": 1000 if not args.smoke else 25,
         "clip_duration_ms": 1500,
         "target_minimization": 0.9,
         "minimization_metric": None,
@@ -469,12 +526,15 @@ def main():
     parser.add_argument("--adversarial-de", type=int, default=12000)
     parser.add_argument("--adversarial-en", type=int, default=3000)
     parser.add_argument("--batch-size", type=int, default=100)
-    parser.add_argument("--steps", type=int, default=30000)
+    parser.add_argument("--steps", type=int, default=25000)
+    parser.add_argument("--negative-gb", type=float, default=3.0,
+                        help="RAM budget for the negative training sets (0 = use all, needs a lot of RAM)")
     parser.add_argument("--audioset-parts", type=int, default=2, help="number of AudioSet files for background noise")
     args = parser.parse_args()
     if args.smoke:
         args.positive_de, args.positive_en, args.adversarial_de, args.adversarial_en = 60, 20, 40, 10
         args.batch_size, args.steps = 10, 60
+        args.negative_gb = 0.0005
 
     work = args.work.expanduser().resolve()
     out = args.out.expanduser().resolve()
