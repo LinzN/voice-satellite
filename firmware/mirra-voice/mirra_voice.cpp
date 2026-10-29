@@ -75,6 +75,10 @@
  * jumps are impossible for audio, so every sample is moved by a multiple of 2^25 to the value closest to the
  * previous one. */
 #define MIC_WRAP (1LL << 25)
+#ifndef MIC_SLOT
+/* -1: find the slot with the microphone at start (the real INMP441 data has noise in its low bits), 0 or 1: fixed */
+#define MIC_SLOT -1
+#endif
 
 /* ------------------------------------------------------------------ state */
 enum DeviceState : uint8_t { ST_OFFLINE, ST_IDLE, ST_LISTENING, ST_THINKING, ST_SPEAKING, ST_PENDING, ST_DENIED };
@@ -559,7 +563,8 @@ static i2s_config_t i2sConfig = {
     .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX | I2S_MODE_RX),
     .sample_rate = SAMPLE_RATE,
     .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT,
-    .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
+    /* both slots: which slot carries the microphone differs between core versions (see MIC_SLOT) */
+    .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
     .communication_format = I2S_COMM_FORMAT_STAND_I2S,
     .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
     .dma_buf_count = 6,
@@ -584,8 +589,12 @@ static void speakerEnable(bool on) {
 }
 
 static void audioTask(void *) {
+  static int32_t micStereo[MIC_CHUNK * 2];
   static int32_t micRaw[MIC_CHUNK];
-  static int32_t out[MIC_CHUNK];
+  static int32_t out[MIC_CHUNK * 2];
+  int micSlot = MIC_SLOT;
+  uint32_t slotLowBits[2] = {0, 0};
+  uint32_t slotStart = 0;
   static int16_t micFrame[MIC_FRAME];
   static int16_t wakeChunk[MIC_CHUNK];
   bool wakeFeeding = false;
@@ -626,7 +635,7 @@ static void audioTask(void *) {
         }
         uint32_t magnitude = abs(sample);
         if (magnitude > peak) peak = magnitude;
-        out[i] = (int32_t)(((int64_t)sample * volumeGain));
+        out[2 * i] = out[2 * i + 1] = (int32_t)(((int64_t)sample * volumeGain));
       }
       if (chimeSamples == 0) chimePhase = 0;
       speakerLevel = (uint8_t)min((uint32_t)255, peak >> 6);
@@ -634,7 +643,7 @@ static void audioTask(void *) {
       i2s_write(I2S_PORT, out, sizeof(out), &written, portMAX_DELAY);
       /* keep the microphone DMA drained */
       size_t dropped;
-      i2s_read(I2S_PORT, micRaw, sizeof(micRaw), &dropped, 0);
+      i2s_read(I2S_PORT, micStereo, sizeof(micStereo), &dropped, 0);
       micFill = 0;
       continue;
     }
@@ -655,8 +664,32 @@ static void audioTask(void *) {
 
     /* ----- input */
     size_t bytesRead = 0;
-    i2s_read(I2S_PORT, micRaw, sizeof(micRaw), &bytesRead, portMAX_DELAY);
-    int count = bytesRead / sizeof(int32_t);
+    i2s_read(I2S_PORT, micStereo, sizeof(micStereo), &bytesRead, portMAX_DELAY);
+    int count = bytesRead / sizeof(int32_t) / 2;
+    if (micSlot < 0) {
+      /* find the slot with the microphone: its 24 bit data has noise in bits 8..13, the empty slot not */
+      if (slotStart == 0) slotStart = millis();
+      for (int i = 0; i < count; i++) {
+        for (int slot = 0; slot < 2; slot++) {
+          if ((uint32_t)micStereo[2 * i + slot] & 0x3F00) slotLowBits[slot]++;
+        }
+      }
+      if (millis() - slotStart > 2000) {
+        micSlot = slotLowBits[1] > slotLowBits[0] ? 1 : 0;
+        Serial.printf("[mic] slot 0: %lu, slot 1: %lu samples with low bits -> using slot %d\n",
+                      (unsigned long)slotLowBits[0], (unsigned long)slotLowBits[1], micSlot);
+      }
+    }
+    {
+      static uint32_t lastSlotReport = 0;
+      if (millis() < 30000 && millis() - lastSlotReport > 1000 && count > 2) {
+        lastSlotReport = millis();
+        Serial.printf("[mic] slot0 %08lx %08lx %08lx | slot1 %08lx %08lx %08lx\n",
+                      (unsigned long)micStereo[0], (unsigned long)micStereo[2], (unsigned long)micStereo[4],
+                      (unsigned long)micStereo[1], (unsigned long)micStereo[3], (unsigned long)micStereo[5]);
+      }
+    }
+    for (int i = 0; i < count; i++) micRaw[i] = micStereo[2 * i + (micSlot < 0 ? 0 : micSlot)];
     {
       /* diagnostics: which bits of the 32 bit I2S word carry data, and the raw range, once per second */
       static uint32_t bitsOr = 0, bitsAnd = 0xFFFFFFFF, lastRawReport = 0;
