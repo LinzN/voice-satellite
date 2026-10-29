@@ -66,11 +66,15 @@
 #define THINKING_TIMEOUT_MS 60000          // give up waiting for an answer
 #define SPEAKER_OFF_DELAY_MS 3000          // amplifier shutdown after playback (less hiss)
 #define MIC_BLANK_MS 150                   // microphone ignored after a sound (echo of the beep in the DMA buffers)
-#ifndef MIC_GAIN_SHIFT
-/* The microphone sample sits in bits 25..0 of the 32 bit I2S slot without sign extension. Shifting it to the top
- * (<< 6) restores the sign; >> 19 then gives 16 bit samples with 2x the gain of the original Onju firmware. */
-#define MIC_GAIN_SHIFT 19
+#ifndef MIC_GAIN
+/* gain relative to the original Onju firmware (raw >> 14) */
+#define MIC_GAIN 2.0f
 #endif
+/* Bits 26 and 27 of the I2S words of the Onju V3 microphone are unreliable: the raw value (with a large DC offset
+ * around 0xF2000000) regularly jumps by exactly 2^26 between two samples. Such jumps are impossible for audio,
+ * so every sample is moved by a multiple of 2^26 to the value closest to the previous one. Measured on recordings
+ * of the board: this removes all crackle. */
+#define MIC_WRAP (1LL << 26)
 
 /* ------------------------------------------------------------------ state */
 enum DeviceState : uint8_t { ST_OFFLINE, ST_IDLE, ST_LISTENING, ST_THINKING, ST_SPEAKING, ST_PENDING, ST_DENIED };
@@ -587,6 +591,9 @@ static void audioTask(void *) {
   bool wakeFeeding = false;
   size_t micFill = 0;
   float dc = 0;
+  int64_t previousRaw = 0;
+  bool havePreviousRaw = false;
+  bool dcReady = false;
   float levelSmooth = 0;
   uint32_t chimePhase = 0;
   uint32_t lastSound = 0;
@@ -674,7 +681,22 @@ static void audioTask(void *) {
     bool streaming = state == ST_LISTENING && !muted && connected && millis() - lastSound > MIC_BLANK_MS;
     uint32_t peak = 0;
     for (int i = 0; i < count; i++) {
-      float sample = (float)((int32_t)((uint32_t)micRaw[i] << 6) >> MIC_GAIN_SHIFT);
+      int64_t raw = micRaw[i];
+      if (havePreviousRaw) {
+        int64_t jump = raw - previousRaw;
+        if (jump > MIC_WRAP / 2) raw -= MIC_WRAP * ((jump + MIC_WRAP / 2) / MIC_WRAP);
+        else if (jump < -MIC_WRAP / 2) raw += MIC_WRAP * ((-jump + MIC_WRAP / 2) / MIC_WRAP);
+      }
+      /* keep the tracked value near the real range, so it cannot drift away over hours */
+      if (raw > INT32_MAX) raw -= MIC_WRAP;
+      if (raw < INT32_MIN) raw += MIC_WRAP;
+      previousRaw = raw;
+      havePreviousRaw = true;
+      float sample = (float)raw / 16384.0f * MIC_GAIN;
+      if (!dcReady) {
+        dc = sample;  // start at the large DC offset of the microphone instead of zero
+        dcReady = true;
+      }
       dc += 0.001f * (sample - dc);
       int32_t value = (int32_t)(sample - dc);
       if (value > 32767) value = 32767;
