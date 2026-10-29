@@ -20,7 +20,7 @@
 #include <ArduinoOTA.h>
 #include <Preferences.h>
 #include <Adafruit_NeoPixel.h>
-#include <driver/i2s.h>
+#include <driver/i2s_std.h>
 #include <mbedtls/md.h>
 #include <esp_mac.h>
 #include <freertos/stream_buffer.h>
@@ -58,6 +58,8 @@
 /* ------------------------------------------------------------------ audio constants */
 #define SAMPLE_RATE 16000
 #define I2S_PORT I2S_NUM_0
+static i2s_chan_handle_t i2sTx = nullptr;
+static i2s_chan_handle_t i2sRx = nullptr;
 #define MIC_CHUNK 256                      // samples per i2s read (16 ms)
 #define MIC_FRAME 512                      // samples per AUDIO frame (32 ms)
 #define PLAY_BUFFER_SECONDS 90
@@ -70,11 +72,6 @@
 /* gain relative to the original Onju firmware (raw >> 14) */
 #define MIC_GAIN 2.0f
 #endif
-/* Single high bits of the I2S words of the Onju V3 microphone are unreliable: depending on the DC level (large
- * offset around 0xF2000000..0xFB000000) the raw value jumps by exactly 2^25 or 2^26 between two samples. Such
- * jumps are impossible for audio, so every sample is moved by a multiple of 2^25 to the value closest to the
- * previous one. */
-#define MIC_WRAP (1LL << 25)
 #ifndef MIC_SLOT
 /* -1: find the slot with the microphone at start (the real INMP441 data has noise in its low bits), 0 or 1: fixed */
 #define MIC_SLOT -1
@@ -559,26 +556,31 @@ static void wakeTask(void *) {
 #endif
 
 /* ------------------------------------------------------------------ audio */
-static i2s_config_t i2sConfig = {
-    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX | I2S_MODE_RX),
-    .sample_rate = SAMPLE_RATE,
-    .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT,
-    /* both slots: which slot carries the microphone differs between core versions (see MIC_SLOT) */
-    .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
-    .communication_format = I2S_COMM_FORMAT_STAND_I2S,
-    .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-    .dma_buf_count = 6,
-    .dma_buf_len = MIC_CHUNK,
-    .use_apll = false,
-    .tx_desc_auto_clear = true,
-    .fixed_mclk = 0};
-
-static i2s_pin_config_t i2sPins = {
-    .mck_io_num = I2S_PIN_NO_CHANGE,
-    .bck_io_num = I2S_BCK_PIN,
-    .ws_io_num = I2S_WS_PIN,
-    .data_out_num = I2S_OUT_PIN,
-    .data_in_num = I2S_IN_PIN};
+/* I2S with the current ESP-IDF driver (the legacy driver delivered corrupted microphone words on the ESP32-S3):
+ * full duplex on one port, Philips format, 32 bit slots, both slots. The INMP441 sends 24 bit data MSB aligned. */
+static void i2sBegin() {
+  i2s_chan_config_t chan = I2S_CHANNEL_DEFAULT_CONFIG(I2S_PORT, I2S_ROLE_MASTER);
+  chan.dma_desc_num = 6;
+  chan.dma_frame_num = MIC_CHUNK;
+  chan.auto_clear_after_cb = true;  // silence when nothing is written
+  ESP_ERROR_CHECK(i2s_new_channel(&chan, &i2sTx, &i2sRx));
+  i2s_std_config_t std = {
+      .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE),
+      .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_STEREO),
+      .gpio_cfg = {
+          .mclk = I2S_GPIO_UNUSED,
+          .bclk = (gpio_num_t)I2S_BCK_PIN,
+          .ws = (gpio_num_t)I2S_WS_PIN,
+          .dout = (gpio_num_t)I2S_OUT_PIN,
+          .din = (gpio_num_t)I2S_IN_PIN,
+          .invert_flags = {.mclk_inv = false, .bclk_inv = false, .ws_inv = false},
+      },
+  };
+  ESP_ERROR_CHECK(i2s_channel_init_std_mode(i2sTx, &std));
+  ESP_ERROR_CHECK(i2s_channel_init_std_mode(i2sRx, &std));
+  ESP_ERROR_CHECK(i2s_channel_enable(i2sTx));
+  ESP_ERROR_CHECK(i2s_channel_enable(i2sRx));
+}
 
 static void speakerEnable(bool on) {
   static bool enabled = false;
@@ -600,8 +602,6 @@ static void audioTask(void *) {
   bool wakeFeeding = false;
   size_t micFill = 0;
   float dc = 0;
-  int64_t previousRaw = 0;
-  bool havePreviousRaw = false;
   bool dcReady = false;
   float levelSmooth = 0;
   uint32_t chimePhase = 0;
@@ -640,10 +640,10 @@ static void audioTask(void *) {
       if (chimeSamples == 0) chimePhase = 0;
       speakerLevel = (uint8_t)min((uint32_t)255, peak >> 6);
       size_t written;
-      i2s_write(I2S_PORT, out, sizeof(out), &written, portMAX_DELAY);
+      i2s_channel_write(i2sTx, out, sizeof(out), &written, portMAX_DELAY);
       /* keep the microphone DMA drained */
       size_t dropped;
-      i2s_read(I2S_PORT, micStereo, sizeof(micStereo), &dropped, 0);
+      i2s_channel_read(i2sRx, micStereo, sizeof(micStereo), &dropped, 0);
       micFill = 0;
       continue;
     }
@@ -664,7 +664,7 @@ static void audioTask(void *) {
 
     /* ----- input */
     size_t bytesRead = 0;
-    i2s_read(I2S_PORT, micStereo, sizeof(micStereo), &bytesRead, portMAX_DELAY);
+    i2s_channel_read(i2sRx, micStereo, sizeof(micStereo), &bytesRead, portMAX_DELAY);
     int count = bytesRead / sizeof(int32_t) / 2;
     if (micSlot < 0) {
       /* find the slot with the microphone: its 24 bit data has noise in bits 8..13, the empty slot not */
@@ -714,18 +714,7 @@ static void audioTask(void *) {
     bool streaming = state == ST_LISTENING && !muted && connected && millis() - lastSound > MIC_BLANK_MS;
     uint32_t peak = 0;
     for (int i = 0; i < count; i++) {
-      int64_t raw = micRaw[i];
-      if (havePreviousRaw) {
-        int64_t jump = raw - previousRaw;
-        if (jump > MIC_WRAP / 2) raw -= MIC_WRAP * ((jump + MIC_WRAP / 2) / MIC_WRAP);
-        else if (jump < -MIC_WRAP / 2) raw += MIC_WRAP * ((-jump + MIC_WRAP / 2) / MIC_WRAP);
-      }
-      /* keep the tracked value near the real range, so it cannot drift away over hours */
-      if (raw > INT32_MAX) raw -= MIC_WRAP;
-      if (raw < INT32_MIN) raw += MIC_WRAP;
-      previousRaw = raw;
-      havePreviousRaw = true;
-      float sample = (float)raw / 16384.0f * MIC_GAIN;
+      float sample = (float)micRaw[i] / 16384.0f * MIC_GAIN;
       if (!dcReady) {
         dc = sample;  // start at the large DC offset of the microphone instead of zero
         dcReady = true;
@@ -990,9 +979,7 @@ void setup() {
     }
   }
 
-  i2s_driver_install(I2S_PORT, &i2sConfig, 0, nullptr);
-  i2s_set_pin(I2S_PORT, &i2sPins);
-  i2s_zero_dma_buffer(I2S_PORT);
+  i2sBegin();
 
   sendMutex = xSemaphoreCreateMutex();
 
