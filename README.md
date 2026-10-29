@@ -169,7 +169,15 @@ voice list                          devices with state, firmware and address
 voice say <device|all> <text>       speak a text
 voice volume <device> <0-10>        set the volume
 voice reboot <device>               restart a device
+voice record <device|all> on|off    save every recording as WAV and do NOT send it to Mirra (beep instead),
+                                    to record "Hey Mirra" with the speaker's own microphone for the training
+voice capture <device|all> on|off   save every recording as WAV and answer normally, to check the microphone
 ```
+
+Recordings are saved in `plugins/voice-satellite/recordings/<device>/` of STEM; the log shows their level
+(peak, average, clipped samples). For the wake word training, tap, wait for the beep and say "Hey Mirra",
+50-100 times from different places in the room; then copy the WAV files into `recordings/` of the training
+folder.
 
 ## Protocol
 

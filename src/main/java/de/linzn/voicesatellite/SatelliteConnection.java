@@ -280,6 +280,17 @@ public final class SatelliteConnection implements Runnable {
         byte[] pcm = this.recording == null ? new byte[0] : this.recording.toByteArray();
         this.recording = null;
         this.send(Protocol.STOP_LISTEN, new byte[0]);
+        VoiceSatellitePlugin.CaptureMode capture = this.plugin.captureMode(this.deviceId);
+        if (capture != VoiceSatellitePlugin.CaptureMode.OFF && pcm.length > Protocol.SAMPLE_RATE * 2 * 3 / 10) {
+            this.plugin.saveRecording(this.deviceId, pcm);
+        }
+        if (capture == VoiceSatellitePlugin.CaptureMode.RECORD) {
+            /* recording for training only: confirm with a beep, nothing goes to Mirra */
+            this.mode = Mode.IDLE;
+            this.sendJson(Protocol.STATE, new JSONObject().put("state", "idle"));
+            this.command(new JSONObject().put("cmd", "chime"));
+            return;
+        }
         if (!understand || pcm.length == 0) {
             this.mode = Mode.IDLE;
             this.sendJson(Protocol.STATE, new JSONObject().put("state", "idle"));

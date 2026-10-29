@@ -21,6 +21,8 @@ import java.util.Arrays;
 
 /**
  * STEM command: voice list | voice say &lt;device|all&gt; &lt;text&gt; | voice volume &lt;device&gt; &lt;0-10&gt; | voice reboot &lt;device&gt;
+ * | voice record &lt;device|all&gt; on|off (save recordings only, for wake word training)
+ * | voice capture &lt;device|all&gt; on|off (save recordings and answer normally, to check the microphone)
  */
 public class VoiceCommand implements ICommand {
 
@@ -59,6 +61,18 @@ public class VoiceCommand implements ICommand {
                         return false;
                     }
                     this.plugin.sendCommand(args[1], new JSONObject().put("cmd", "volume").put("value", Integer.parseInt(args[2])));
+                }
+                case "record", "capture" -> {
+                    if (args.length < 3) {
+                        return false;
+                    }
+                    boolean on = args[2].equalsIgnoreCase("on");
+                    VoiceSatellitePlugin.CaptureMode mode = !on ? VoiceSatellitePlugin.CaptureMode.OFF
+                            : args[0].equalsIgnoreCase("record") ? VoiceSatellitePlugin.CaptureMode.RECORD
+                            : VoiceSatellitePlugin.CaptureMode.CAPTURE;
+                    this.plugin.setCaptureMode(args[1], mode);
+                    this.plugin.getPluginLogger().info("Capture mode of " + args[1] + ": " + mode + ", files in "
+                            + this.plugin.recordingsFolder().getAbsolutePath());
                 }
                 case "reboot" -> {
                     if (args.length < 2) {

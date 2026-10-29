@@ -18,6 +18,7 @@ import de.linzn.mirra.voice.MirraVoice;
 import de.linzn.stem.modules.pluginModule.STEMPlugin;
 import org.json.JSONObject;
 
+import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
@@ -35,6 +36,12 @@ public class VoiceSatellitePlugin extends STEMPlugin {
     public static VoiceSatellitePlugin voiceSatellitePlugin;
 
     private final Map<String, SatelliteConnection> connections = new ConcurrentHashMap<>();
+    private final Map<String, CaptureMode> captureModes = new ConcurrentHashMap<>();
+
+    /**
+     * OFF: normal; CAPTURE: also save every recording as WAV; RECORD: only save (for wake word training).
+     */
+    public enum CaptureMode { OFF, CAPTURE, RECORD }
     private SatelliteConfig config;
     private SatelliteServer server;
     private ExecutorService workers;
@@ -118,6 +125,61 @@ public class VoiceSatellitePlugin extends STEMPlugin {
     String accessState(String deviceId, String deviceName) {
         MirraVoice voice = this.getMirraVoice();
         return voice == null ? "idle" : voice.accessState(deviceId);
+    }
+
+    CaptureMode captureMode(String deviceId) {
+        return this.captureModes.getOrDefault(deviceId, this.captureModes.getOrDefault("*", CaptureMode.OFF));
+    }
+
+    void setCaptureMode(String deviceIdOrAll, CaptureMode mode) {
+        String key = deviceIdOrAll.equalsIgnoreCase("all") ? "*" : this.connection(deviceIdOrAll)
+                .map(SatelliteConnection::deviceId).orElse(deviceIdOrAll);
+        if (key.equals("*")) {
+            this.captureModes.clear();
+        }
+        this.captureModes.put(key, mode);
+    }
+
+    File recordingsFolder() {
+        return new File(this.getDataFolder(), "recordings");
+    }
+
+    /**
+     * Save a recording of a device as WAV and log its level, to check the microphone and to collect wake word
+     * training data.
+     */
+    void saveRecording(String deviceId, byte[] pcm) {
+        try {
+            File folder = new File(this.recordingsFolder(), deviceId);
+            if (!folder.isDirectory() && !folder.mkdirs()) {
+                throw new IOException("Cannot create " + folder);
+            }
+            String name = java.time.LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss-SSS")) + ".wav";
+            File file = new File(folder, name);
+            java.nio.file.Files.write(file.toPath(), Audio.wav(pcm, Protocol.SAMPLE_RATE));
+            short[] samples = Audio.toSamples(pcm);
+            int peak = 0;
+            double sum = 0;
+            int clipped = 0;
+            for (short sample : samples) {
+                int magnitude = Math.abs(sample);
+                peak = Math.max(peak, magnitude);
+                sum += (double) sample * sample;
+                if (magnitude >= 32000) {
+                    clipped++;
+                }
+            }
+            double rms = Math.sqrt(sum / Math.max(1, samples.length));
+            this.getPluginLogger().info(String.format(java.util.Locale.ROOT,
+                    "Recording %s: %.1f s, peak %.1f dBFS, average %.1f dBFS, %d clipped samples",
+                    file.getPath(), samples.length / (double) Protocol.SAMPLE_RATE, dbfs(peak), dbfs(rms), clipped));
+        } catch (IOException e) {
+            this.getPluginLogger().warning("Could not save recording of " + deviceId + ": " + e.getMessage());
+        }
+    }
+
+    private static double dbfs(double value) {
+        return value <= 0 ? -96.0 : 20 * Math.log10(value / 32768.0);
     }
 
     int connectionCount() {
