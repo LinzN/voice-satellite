@@ -70,11 +70,11 @@
 /* gain relative to the original Onju firmware (raw >> 14) */
 #define MIC_GAIN 2.0f
 #endif
-/* Bits 26 and 27 of the I2S words of the Onju V3 microphone are unreliable: the raw value (with a large DC offset
- * around 0xF2000000) regularly jumps by exactly 2^26 between two samples. Such jumps are impossible for audio,
- * so every sample is moved by a multiple of 2^26 to the value closest to the previous one. Measured on recordings
- * of the board: this removes all crackle. */
-#define MIC_WRAP (1LL << 26)
+/* Single high bits of the I2S words of the Onju V3 microphone are unreliable: depending on the DC level (large
+ * offset around 0xF2000000..0xFB000000) the raw value jumps by exactly 2^25 or 2^26 between two samples. Such
+ * jumps are impossible for audio, so every sample is moved by a multiple of 2^25 to the value closest to the
+ * previous one. */
+#define MIC_WRAP (1LL << 25)
 
 /* ------------------------------------------------------------------ state */
 enum DeviceState : uint8_t { ST_OFFLINE, ST_IDLE, ST_LISTENING, ST_THINKING, ST_SPEAKING, ST_PENDING, ST_DENIED };
