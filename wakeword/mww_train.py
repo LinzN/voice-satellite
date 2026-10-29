@@ -400,8 +400,9 @@ def stage_recordings(work, out):
         if frames < 10:
             continue
         rms = np.sqrt(np.mean(audio[:frames * frame].reshape(frames, frame) ** 2, axis=1)) + 1e-6
+        # relative thresholds: phone memos are often quiet, and noise suppression makes the pauses digital silence
         noise = np.percentile(rms, 20)
-        loud = rms > max(noise * 4, 0.01)
+        loud = rms > max(noise * 4, np.percentile(rms, 95) * 0.15, 0.0003)
         # merge loud frames into utterances; pauses shorter than 0.35 s stay inside one utterance
         segments, start, quiet = [], None, 0
         for index, is_loud in enumerate(loud):
@@ -423,7 +424,9 @@ def stage_recordings(work, out):
                 continue
             a = max(0, first * frame - 2400)
             b = min(len(audio), last * frame + 2400)
-            clip = (audio[a:b] * 32767).astype(np.int16)
+            piece = audio[a:b]
+            piece = piece / max(np.abs(piece).max(), 1e-4) * 0.5  # same level for every clip, augmentation varies it
+            clip = (piece * 32767).astype(np.int16)
             name = f"{file.stem}_{count:03d}.wav"
             scipy.io.wavfile.write(target / name, 16000, clip)
             scipy.io.wavfile.write(check / name, 16000, clip)
@@ -439,7 +442,7 @@ def recordings_changed(work, out):
     """New or changed recordings invalidate the features and the model."""
     source = out / "recordings"
     files = sorted(f"{f.name}:{f.stat().st_size}" for f in source.iterdir() if f.is_file()) if source.exists() else []
-    signature = "\n".join(files)
+    signature = "segmenter-2\n" + "\n".join(files)
     stamp = work / ".recordings"
     if stamp.exists() and stamp.read_text() == signature:
         return False
@@ -473,13 +476,17 @@ def make_features(clips_dir, out_dir, name, background, rirs, train_repeat=2):
     for split, split_name, repeat, slide in (("training", "train", train_repeat, 10), ("validation", "validation", 1, 10),
                                              ("testing", "test", 1, 1)):
         target = out_dir / split / f"{name}_mmap"
-        if target.exists():
+        done_marker = out_dir / split / f".{name}.complete"
+        if target.exists() and done_marker.exists():
             continue
+        # an interrupted run leaves a half written feature set behind
+        shutil.rmtree(target, ignore_errors=True)
         (out_dir / split).mkdir(parents=True, exist_ok=True)
         spectrograms = SpectrogramGeneration(clips=clips, augmenter=augmenter, slide_frames=slide, step_ms=10)
         RaggedMmap.from_generator(out_dir=str(target),
                                   sample_generator=spectrograms.spectrogram_generator(split=split_name, repeat=repeat),
                                   batch_size=100, verbose=True)
+        done_marker.write_text("ok")
 
 
 def smoke_negatives(work):
