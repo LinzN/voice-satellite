@@ -31,7 +31,9 @@ When it is done, this folder contains:
 Real recordings of the people in the house help the most. Record a voice memo (phone or PC, any format ffmpeg
 reads: m4a, mp3, wav, ogg, ...) per person: say "Hey Mirra" 50-100 times with a pause of 1-2 seconds, at
 different distances, louder and quieter, faster and slower, the way you would really say it. Put the files into
-`recordings/` next to this script and start `train.sh` again.
+`recordings/` next to this script and start `train.sh` again. Sub folders are read too, e.g. `recordings/pot/` for
+the WAV files recorded with a speaker (`voice record <device> on`), which are the best training data because they
+come from the speaker's own microphone.
 
 The script cuts the memos into single utterances (`recordings/segments/`, listen to a few to check) and uses
 each of them many times with different background noise and room echo. New or changed recordings are picked up

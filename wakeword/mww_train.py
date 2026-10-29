@@ -376,7 +376,7 @@ def stage_recordings(work, out):
     target = work / "samples" / "real"
     if not source.exists():
         source.mkdir(parents=True, exist_ok=True)
-    files = [f for f in source.iterdir() if f.is_file() and not f.name.startswith(".")]
+    files = recording_files(source)
     shutil.rmtree(target, ignore_errors=True)
     target.mkdir(parents=True, exist_ok=True)
     check = source / "segments"
@@ -427,7 +427,7 @@ def stage_recordings(work, out):
             piece = audio[a:b]
             piece = piece / max(np.abs(piece).max(), 1e-4) * 0.5  # same level for every clip, augmentation varies it
             clip = (piece * 32767).astype(np.int16)
-            name = f"{file.stem}_{count:03d}.wav"
+            name = f"{file.parent.name}_{file.stem}_{count:03d}.wav"
             scipy.io.wavfile.write(target / name, 16000, clip)
             scipy.io.wavfile.write(check / name, 16000, clip)
             count += 1
@@ -438,10 +438,18 @@ def stage_recordings(work, out):
     return total
 
 
+def recording_files(source):
+    """Recordings in <out>/recordings and its sub folders (e.g. recordings/pot), without the cut segments."""
+    if not source.exists():
+        return []
+    return sorted(f for f in source.rglob("*") if f.is_file() and not f.name.startswith(".")
+                  and "segments" not in f.relative_to(source).parts)
+
+
 def recordings_changed(work, out):
     """New or changed recordings invalidate the features and the model."""
     source = out / "recordings"
-    files = sorted(f"{f.name}:{f.stat().st_size}" for f in source.iterdir() if f.is_file()) if source.exists() else []
+    files = [f"{f.relative_to(source)}:{f.stat().st_size}" for f in recording_files(source)]
     signature = "segmenter-2\n" + "\n".join(files)
     stamp = work / ".recordings"
     if stamp.exists() and stamp.read_text() == signature:
