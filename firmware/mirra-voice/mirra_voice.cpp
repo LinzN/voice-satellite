@@ -650,6 +650,27 @@ static void audioTask(void *) {
     size_t bytesRead = 0;
     i2s_read(I2S_PORT, micRaw, sizeof(micRaw), &bytesRead, portMAX_DELAY);
     int count = bytesRead / sizeof(int32_t);
+    {
+      /* diagnostics: which bits of the 32 bit I2S word carry data, and the raw range, once per second */
+      static uint32_t bitsOr = 0, bitsAnd = 0xFFFFFFFF, lastRawReport = 0;
+      static int32_t rawMin = INT32_MAX, rawMax = INT32_MIN;
+      for (int i = 0; i < count; i++) {
+        bitsOr |= (uint32_t)micRaw[i];
+        bitsAnd &= (uint32_t)micRaw[i];
+        if (micRaw[i] < rawMin) rawMin = micRaw[i];
+        if (micRaw[i] > rawMax) rawMax = micRaw[i];
+      }
+      if (millis() - lastRawReport > 1000 && count > 4) {
+        lastRawReport = millis();
+        Serial.printf("[mic] raw min %08lx max %08lx | bits ever 1: %08lx, always 1: %08lx | sample %08lx %08lx %08lx %08lx\n",
+                      (unsigned long)rawMin, (unsigned long)rawMax, (unsigned long)bitsOr, (unsigned long)bitsAnd,
+                      (unsigned long)micRaw[0], (unsigned long)micRaw[1], (unsigned long)micRaw[2], (unsigned long)micRaw[3]);
+        bitsOr = 0;
+        bitsAnd = 0xFFFFFFFF;
+        rawMin = INT32_MAX;
+        rawMax = INT32_MIN;
+      }
+    }
     bool streaming = state == ST_LISTENING && !muted && connected && millis() - lastSound > MIC_BLANK_MS;
     uint32_t peak = 0;
     for (int i = 0; i < count; i++) {
