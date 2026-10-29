@@ -65,6 +65,12 @@
 #define MAX_LISTEN_MS 20000                // hard limit if the server never sends STOP_LISTEN
 #define THINKING_TIMEOUT_MS 60000          // give up waiting for an answer
 #define SPEAKER_OFF_DELAY_MS 3000          // amplifier shutdown after playback (less hiss)
+#define MIC_BLANK_MS 150                   // microphone ignored after a sound (echo of the beep in the DMA buffers)
+#ifndef MIC_GAIN_SHIFT
+/* The microphone sample sits in bits 25..0 of the 32 bit I2S slot without sign extension. Shifting it to the top
+ * (<< 6) restores the sign; >> 19 then gives 16 bit samples with 2x the gain of the original Onju firmware. */
+#define MIC_GAIN_SHIFT 19
+#endif
 
 /* ------------------------------------------------------------------ state */
 enum DeviceState : uint8_t { ST_OFFLINE, ST_IDLE, ST_LISTENING, ST_THINKING, ST_SPEAKING, ST_PENDING, ST_DENIED };
@@ -637,16 +643,17 @@ static void audioTask(void *) {
         setState(ST_IDLE);
       }
     }
-    if (millis() - lastSound > SPEAKER_OFF_DELAY_MS) speakerEnable(false);
+    /* while listening the amplifier is off, its idle hiss would end up in the recording */
+    if (millis() - lastSound > SPEAKER_OFF_DELAY_MS || state == ST_LISTENING) speakerEnable(false);
 
     /* ----- input */
     size_t bytesRead = 0;
     i2s_read(I2S_PORT, micRaw, sizeof(micRaw), &bytesRead, portMAX_DELAY);
     int count = bytesRead / sizeof(int32_t);
-    bool streaming = state == ST_LISTENING && !muted && connected;
+    bool streaming = state == ST_LISTENING && !muted && connected && millis() - lastSound > MIC_BLANK_MS;
     uint32_t peak = 0;
     for (int i = 0; i < count; i++) {
-      float sample = (float)(micRaw[i] >> 14);
+      float sample = (float)((int32_t)((uint32_t)micRaw[i] << 6) >> MIC_GAIN_SHIFT);
       dc += 0.001f * (sample - dc);
       int32_t value = (int32_t)(sample - dc);
       if (value > 32767) value = 32767;
