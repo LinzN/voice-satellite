@@ -58,6 +58,7 @@ public final class SatelliteConnection implements Runnable {
     private final ExecutorService workers;
     private final Object writeLock = new Object();
     private final ReentrantLock speechLock = new ReentrantLock(true);
+    private final java.util.concurrent.atomic.AtomicBoolean soundSending = new java.util.concurrent.atomic.AtomicBoolean();
     /* every new turn or cancel increments the generation; work of an older generation is dropped */
     private final AtomicInteger generation = new AtomicInteger();
 
@@ -377,6 +378,18 @@ public final class SatelliteConnection implements Runnable {
      * @param pcm PCM 16 bit mono with {@link Protocol#SAMPLE_RATE}
      */
     public void playSound(byte[] pcm) throws Exception {
+        /* a second ring while the first is still being sent is dropped: restarting it would interrupt the sound */
+        if (!this.soundSending.compareAndSet(false, true)) {
+            return;
+        }
+        try {
+            this.streamSound(pcm);
+        } finally {
+            this.soundSending.set(false);
+        }
+    }
+
+    private void streamSound(byte[] pcm) throws Exception {
         int turn = this.generation.incrementAndGet();
         this.mode = Mode.IDLE;
         this.recording = null;
