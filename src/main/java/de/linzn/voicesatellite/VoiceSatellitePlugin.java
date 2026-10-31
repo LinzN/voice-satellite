@@ -76,7 +76,8 @@ public class VoiceSatellitePlugin extends STEMPlugin {
             public void play(String deviceId, String sound) throws Exception {
                 SatelliteConnection connection = VoiceSatellitePlugin.this.connection(deviceId)
                         .orElseThrow(() -> new IOException("Device " + deviceId + " is offline"));
-                connection.playSound(Sounds.load(VoiceSatellitePlugin.this.soundsFolder(), sound));
+                connection.playSound(Sounds.load(VoiceSatellitePlugin.this.soundsFolder(), sound,
+                        java.time.LocalDate.now(VoiceSatellitePlugin.this.getStemApi().system().getZone())));
             }
         };
         this.getMirraVoice().registerSpeaker(this.speaker);

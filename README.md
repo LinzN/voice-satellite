@@ -188,9 +188,22 @@ a question being answered is dropped, a running answer is cut off. Configured in
 (`voice.doorbell.enabled`, `voice.doorbell.devices` to limit the rooms, `voice.doorbell.text` for a spoken
 sentence after the sound).
 
-The built-in sound is two soft, glass-like chime chords, played twice. Put an own `doorbell.wav` (PCM 16 bit, mono or stereo, any sample
-rate) into `plugins/voice-satellite/sounds/` to replace it; it is read on every ring. The volume is the volume of
-the speaker. Interrupting needs firmware 1.2.0; older firmware plays the sound once the speaker is idle.
+The built-in sound is two soft, glass-like chime chords, played twice. Own sounds go into
+`plugins/voice-satellite/sounds/doorbell/` (create the folder) as WAV files (PCM 16 bit, mono or stereo, any sample
+rate); they are read on every ring:
+
+| File | Plays |
+|---|---|
+| `doorbell.wav` | all year, instead of the built-in sound |
+| `halloween.wav` | Oct 29 - Nov 2 |
+| `christmas.wav` or `weihnachten.wav` | Dec 24 - 26 |
+| `newyear.wav` or `silvester.wav` | Dec 31 - Jan 1 |
+| `easter.wav` or `ostern.wav` | Good Friday - Easter Monday |
+| `MM-DD_MM-DD.wav`, `MM-DD_MM-DD_<text>.wav` | own range, e.g. `12-01_12-23_advent.wav`, also over new year (`12-20_01-06.wav`) |
+
+An occasion wins over `doorbell.wav` while it lasts; if several match, the shortest range. Without a matching file
+the built-in sound plays. (`sounds/doorbell.wav` directly in `sounds/` still works as all-year file.) The volume is
+the volume of the speaker. Interrupting needs firmware 1.2.0; older firmware plays the sound once the speaker is idle.
 
 ## Protocol
 

@@ -18,7 +18,12 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.file.Files;
+import java.time.LocalDate;
+import java.time.temporal.ChronoUnit;
+import java.util.Arrays;
 import java.util.Locale;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Sounds the devices play, as PCM 16 bit mono with {@link Protocol#SAMPLE_RATE}. A WAV file
@@ -30,19 +35,126 @@ final class Sounds {
     private Sounds() {
     }
 
-    static byte[] load(File folder, String name) throws IOException {
+    static byte[] load(File folder, String name, LocalDate today) throws IOException {
+        File file = choose(folder, name, today);
+        if (file != null) {
+            return Audio.toBytes(readWav(Files.readAllBytes(file.toPath())));
+        }
+        if (name.equalsIgnoreCase("doorbell")) {
+            return Audio.toBytes(doorbell());
+        }
+        throw new IllegalArgumentException("Unknown sound " + name + " (no file in " + new File(folder, name).getAbsolutePath() + ")");
+    }
+
+    /**
+     * The file for a sound today, or null for the built-in one. In {@code sounds/<name>/}:
+     * <ul>
+     *     <li>an occasion file wins while its days last: {@code halloween.wav} (Oct 29 - Nov 2),
+     *     {@code christmas.wav} / {@code weihnachten.wav} (Dec 24 - 26), {@code newyear.wav} / {@code silvester.wav}
+     *     (Dec 31 - Jan 1), {@code easter.wav} / {@code ostern.wav} (Good Friday - Easter Monday), or an own range
+     *     {@code MM-DD_MM-DD[_text].wav}, e.g. {@code 12-01_12-23_advent.wav}; if several match, the shortest range</li>
+     *     <li>otherwise {@code <name>.wav} in that folder, all year</li>
+     * </ul>
+     * {@code sounds/<name>.wav} directly in the sounds folder still works as all-year file.
+     */
+    static File choose(File folder, String name, LocalDate today) {
         String clean = name.toLowerCase(Locale.ROOT);
         if (!clean.matches("[a-z0-9_-]{1,32}")) {
             throw new IllegalArgumentException("Invalid sound name " + name);
         }
-        File custom = new File(folder, clean + ".wav");
-        if (custom.isFile()) {
-            return Audio.toBytes(readWav(Files.readAllBytes(custom.toPath())));
+        File directory = new File(folder, clean);
+        File[] files = directory.listFiles((dir, file) -> file.toLowerCase(Locale.ROOT).endsWith(".wav"));
+        if (files != null) {
+            File best = null;
+            long bestDays = Long.MAX_VALUE;
+            Arrays.sort(files);
+            for (File file : files) {
+                String stem = file.getName().substring(0, file.getName().length() - 4).toLowerCase(Locale.ROOT);
+                LocalDate[] range = occasion(stem, today);
+                if (range != null) {
+                    long days = ChronoUnit.DAYS.between(range[0], range[1]);
+                    if (days < bestDays && file.isFile()) {
+                        best = file;
+                        bestDays = days;
+                    }
+                }
+            }
+            if (best != null) {
+                return best;
+            }
+            File all = new File(directory, clean + ".wav");
+            if (all.isFile()) {
+                return all;
+            }
         }
-        if (clean.equals("doorbell")) {
-            return Audio.toBytes(doorbell());
+        File old = new File(folder, clean + ".wav");
+        return old.isFile() ? old : null;
+    }
+
+    private static final Pattern RANGE = Pattern.compile("(\\d{2})-(\\d{2})_(\\d{2})-(\\d{2})(_.*)?");
+
+    /**
+     * @return first and last day of the occasion that contains today, or null if the name is no occasion or it is
+     * not its time
+     */
+    static LocalDate[] occasion(String stem, LocalDate today) {
+        for (int year = today.getYear() - 1; year <= today.getYear() + 1; year++) {
+            LocalDate[] range = occasionIn(stem, year);
+            if (range == null) {
+                return null;
+            }
+            if (!today.isBefore(range[0]) && !today.isAfter(range[1])) {
+                return range;
+            }
         }
-        throw new IllegalArgumentException("Unknown sound " + name + " (no " + custom.getAbsolutePath() + ")");
+        return null;
+    }
+
+    /**
+     * @return the occasion starting in the given year, or null if the name is no occasion
+     */
+    private static LocalDate[] occasionIn(String stem, int year) {
+        switch (stem) {
+            case "halloween" -> {
+                LocalDate day = LocalDate.of(year, 10, 31);
+                return new LocalDate[]{day.minusDays(2), day.plusDays(2)};
+            }
+            case "christmas", "weihnachten" -> {
+                return new LocalDate[]{LocalDate.of(year, 12, 24), LocalDate.of(year, 12, 26)};
+            }
+            case "newyear", "silvester" -> {
+                return new LocalDate[]{LocalDate.of(year, 12, 31), LocalDate.of(year + 1, 1, 1)};
+            }
+            case "easter", "ostern" -> {
+                LocalDate sunday = easterSunday(year);
+                return new LocalDate[]{sunday.minusDays(2), sunday.plusDays(1)};
+            }
+            default -> {
+                Matcher matcher = RANGE.matcher(stem);
+                if (!matcher.matches()) {
+                    return null;
+                }
+                try {
+                    LocalDate from = LocalDate.of(year, Integer.parseInt(matcher.group(1)), Integer.parseInt(matcher.group(2)));
+                    LocalDate to = LocalDate.of(year, Integer.parseInt(matcher.group(3)), Integer.parseInt(matcher.group(4)));
+                    /* a range over new year, e.g. 12-20_01-06 */
+                    return new LocalDate[]{from, to.isBefore(from) ? to.plusYears(1) : to};
+                } catch (java.time.DateTimeException e) {
+                    return null;
+                }
+            }
+        }
+    }
+
+    /**
+     * Easter Sunday (Gregorian calendar, anonymous Gregorian algorithm).
+     */
+    static LocalDate easterSunday(int year) {
+        int a = year % 19, b = year / 100, c = year % 100, d = b / 4, e = b % 4, f = (b + 8) / 25, g = (b - f + 1) / 3;
+        int h = (19 * a + b - d - g + 15) % 30, i = c / 4, k = c % 4, l = (32 + 2 * e + 2 * i - h - k) % 7;
+        int m = (a + 11 * h + 22 * l) / 451;
+        int month = (h + l - 7 * m + 114) / 31, day = (h + l - 7 * m + 114) % 31 + 1;
+        return LocalDate.of(year, month, day);
     }
 
     /**
