@@ -46,40 +46,62 @@ final class Sounds {
     }
 
     /**
-     * Two struck chime bars, high then low ("ding-dong"), played twice.
+     * A bright, short melody of glass-like FM tones (E6 B6 G#6 A6 B6), played twice, with a little room echo.
      */
     static short[] doorbell() {
         int rate = Protocol.SAMPLE_RATE;
         double[] mix = new double[(int) (rate * 3.6)];
-        double[][] strikes = {{0.00, 659.25}, {0.55, 523.25}, {1.65, 659.25}, {2.20, 523.25}};
-        for (double[] strike : strikes) {
-            strike(mix, rate, strike[0], strike[1]);
+        double[][] melody = {{1318.51, 0.00}, {1975.53, 0.13}, {1661.22, 0.26}, {1760.00, 0.45}, {1975.53, 0.62}};
+        for (double repeat : new double[]{0.0, 1.6}) {
+            for (int i = 0; i < melody.length; i++) {
+                /* the last note rings longer */
+                tone(mix, rate, repeat + melody[i][1], melody[i][0], i == melody.length - 1 ? 0.9 : 0.45);
+            }
         }
+        double[] wet = echo(mix, rate, 0.3);
         double peak = 1e-9;
-        for (double value : mix) {
+        for (double value : wet) {
             peak = Math.max(peak, Math.abs(value));
         }
-        short[] samples = new short[mix.length];
-        double gain = 0.75 * 32767 / peak;
-        for (int i = 0; i < mix.length; i++) {
-            samples[i] = (short) Math.round(mix[i] * gain);
+        short[] samples = new short[wet.length];
+        double gain = 0.8 * 32767 / peak;
+        for (int i = 0; i < wet.length; i++) {
+            samples[i] = (short) Math.round(wet[i] * gain);
         }
         return samples;
     }
 
-    private static void strike(double[] mix, int rate, double start, double frequency) {
-        /* partial frequency ratio, amplitude, decay time in seconds: a bar sounds mostly its fundamental */
-        double[][] partials = {{1.0, 1.0, 0.9}, {2.0, 0.35, 0.45}, {3.0, 0.12, 0.25}, {4.16, 0.06, 0.12}};
+    /**
+     * FM tone: modulator at twice the frequency with a quickly decaying index gives a glass/marimba attack.
+     */
+    private static void tone(double[] mix, int rate, double start, double frequency, double decay) {
         int first = (int) (start * rate);
-        for (int i = first; i < mix.length; i++) {
-            double t = (double) (i - first) / rate;
-            double attack = Math.min(1.0, t / 0.004);
-            double value = 0;
-            for (double[] partial : partials) {
-                value += partial[1] * Math.exp(-t / partial[2]) * Math.sin(2 * Math.PI * frequency * partial[0] * t);
-            }
-            mix[i] += attack * value;
+        int length = Math.min((int) (1.4 * rate), mix.length - first);
+        for (int i = 0; i < length; i++) {
+            double t = (double) i / rate;
+            double index = Math.exp(-t / 0.08);
+            double envelope = Math.exp(-t / decay) * Math.min(1.0, t / 0.003);
+            mix[first + i] += envelope * Math.sin(2 * Math.PI * frequency * t + index * Math.sin(2 * Math.PI * frequency * 2 * t));
         }
+    }
+
+    /**
+     * Four feedback delays: a small, bright room.
+     */
+    private static double[] echo(double[] dry, int rate, double amount) {
+        double[] out = dry.clone();
+        double[][] lines = {{0.029, 0.5}, {0.037, 0.45}, {0.041, 0.4}, {0.053, 0.35}};
+        for (double[] line : lines) {
+            int delay = (int) (line[0] * rate);
+            double[] comb = new double[dry.length];
+            for (int i = delay; i < dry.length; i++) {
+                comb[i] = dry[i - delay] + line[1] * comb[i - delay];
+            }
+            for (int i = 0; i < dry.length; i++) {
+                out[i] += amount * comb[i] / lines.length;
+            }
+        }
+        return out;
     }
 
     /**
