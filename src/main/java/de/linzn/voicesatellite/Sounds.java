@@ -46,19 +46,20 @@ final class Sounds {
     }
 
     /**
-     * A bright, short melody of glass-like FM tones (E6 B6 G#6 A6 B6), played twice, with a little room echo.
+     * Two soft, glass-like chords (E6+G#6, then C#6+F#6), played twice, with a little room echo.
      */
     static short[] doorbell() {
         int rate = Protocol.SAMPLE_RATE;
-        double[] mix = new double[(int) (rate * 3.6)];
-        double[][] melody = {{1318.51, 0.00}, {1975.53, 0.13}, {1661.22, 0.26}, {1760.00, 0.45}, {1975.53, 0.62}};
-        for (double repeat : new double[]{0.0, 1.6}) {
-            for (int i = 0; i < melody.length; i++) {
-                /* the last note rings longer */
-                tone(mix, rate, repeat + melody[i][1], melody[i][0], i == melody.length - 1 ? 0.9 : 0.45);
+        double[] mix = new double[(int) (rate * 3.4)];
+        for (double repeat : new double[]{0.0, 1.5}) {
+            for (double frequency : new double[]{1318.51, 1661.22}) {
+                tone(mix, rate, repeat, frequency, 1.0, 0.7);
+            }
+            for (double frequency : new double[]{1108.73, 1479.98}) {
+                tone(mix, rate, repeat + 0.35, frequency, 0.9, 0.8);
             }
         }
-        double[] wet = echo(mix, rate, 0.3);
+        double[] wet = echo(mix, rate, 0.35);
         double peak = 1e-9;
         for (double value : wet) {
             peak = Math.max(peak, Math.abs(value));
@@ -72,16 +73,16 @@ final class Sounds {
     }
 
     /**
-     * FM tone: modulator at twice the frequency with a quickly decaying index gives a glass/marimba attack.
+     * FM tone with the modulator at 3.5 times the frequency and a quickly decaying index: a glassy, bell-like strike.
      */
-    private static void tone(double[] mix, int rate, double start, double frequency, double decay) {
+    private static void tone(double[] mix, int rate, double start, double frequency, double amplitude, double decay) {
         int first = (int) (start * rate);
-        int length = Math.min((int) (1.4 * rate), mix.length - first);
+        int length = Math.min((int) (1.8 * rate), mix.length - first);
         for (int i = 0; i < length; i++) {
             double t = (double) i / rate;
-            double index = Math.exp(-t / 0.08);
-            double envelope = Math.exp(-t / decay) * Math.min(1.0, t / 0.003);
-            mix[first + i] += envelope * Math.sin(2 * Math.PI * frequency * t + index * Math.sin(2 * Math.PI * frequency * 2 * t));
+            double index = 0.9 * Math.exp(-t / 0.05);
+            double envelope = amplitude * Math.exp(-t / decay) * Math.min(1.0, t / 0.003);
+            mix[first + i] += envelope * Math.sin(2 * Math.PI * frequency * t + index * Math.sin(2 * Math.PI * frequency * 3.5 * t));
         }
     }
 

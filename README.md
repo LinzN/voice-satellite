@@ -188,7 +188,7 @@ a question being answered is dropped, a running answer is cut off. Configured in
 (`voice.doorbell.enabled`, `voice.doorbell.devices` to limit the rooms, `voice.doorbell.text` for a spoken
 sentence after the sound).
 
-The built-in sound is a short, bright chime melody played twice. Put an own `doorbell.wav` (PCM 16 bit, mono or stereo, any sample
+The built-in sound is two soft, glass-like chime chords, played twice. Put an own `doorbell.wav` (PCM 16 bit, mono or stereo, any sample
 rate) into `plugins/voice-satellite/sounds/` to replace it; it is read on every ring. The volume is the volume of
 the speaker. Interrupting needs firmware 1.2.0; older firmware plays the sound once the speaker is idle.
 
