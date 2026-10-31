@@ -26,6 +26,7 @@ The speaker hardware keeps working: speaker, microphone, the six LEDs, the three
 | Tap the center while Mirra thinks | Cancels the question |
 | Tap left / right | Volume down / up (stored on the device) |
 | Mute switch | Microphone off (also the wake word); the speaker still plays announcements |
+| Somebody rings at the door | Door bell sound on all speakers, also in the middle of a conversation (see [Door bell](#door-bell)) |
 
 If Mirra's answer ends with a question, the speaker listens again by itself. While the speaker plays, it does not
 react to the wake word (no echo cancellation on the board), tap to interrupt.
@@ -167,6 +168,7 @@ Speaking on the devices from chats and tasks:
 ```
 voice list                          devices with state, firmware and address
 voice say <device|all> <text>       speak a text
+voice ring <device|all>             play the door bell sound (test)
 voice volume <device> <0-10>        set the volume
 voice reboot <device>               restart a device
 voice record <device|all> on|off    save every recording as WAV and do NOT send it to Mirra (beep instead),
@@ -178,6 +180,17 @@ Recordings are saved in `plugins/voice-satellite/recordings/<device>/` of STEM; 
 (peak, average, clipped samples). For the wake word training, tap, wait for the beep and say "Hey Mirra",
 50-100 times from different places in the room; then copy the WAV files into `recordings/` of the training
 folder.
+
+## Door bell
+
+When a door bell of home-devices rings, Mirra plays a door bell sound on the speakers right away: listening stops,
+a question being answered is dropped, a running answer is cut off. Configured in Mirra's config
+(`voice.doorbell.enabled`, `voice.doorbell.devices` to limit the rooms, `voice.doorbell.text` for a spoken
+sentence after the sound).
+
+The built-in sound is a "ding-dong" played twice. Put an own `doorbell.wav` (PCM 16 bit, mono or stereo, any sample
+rate) into `plugins/voice-satellite/sounds/` to replace it; it is read on every ring. The volume is the volume of
+the speaker. Interrupting needs firmware 1.2.0; older firmware plays the sound once the speaker is idle.
 
 ## Protocol
 
@@ -195,7 +208,7 @@ mono, 16 kHz in both directions. Control payloads are JSON.
 | `0x84` STATE | server → device | `idle`, `thinking`, `pending`, `denied`, `error` |
 | `0x82` PLAY | server → device | speaker audio |
 | `0x83` PLAY_END | server → device | `{"listen":bool}` end of the answer, or `{"cancelled":true}` as reply to `cancel` |
-| `0x87` CMD | server → device | `{"cmd":"volume","value":n}`, `chime`, `reboot` |
+| `0x87` CMD | server → device | `{"cmd":"volume","value":n}`, `chime`, `reboot`, `interrupt` (drop queued audio and stop listening, before a sound) |
 | `0x04` / `0x86` | both | ping / pong every 10 s |
 | `0x88` ERROR | server → device | `{"message"}` before closing |
 

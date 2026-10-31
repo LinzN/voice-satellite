@@ -33,7 +33,7 @@
 #error "Copy config.example.h to config.h and fill in your Wi-Fi and server settings"
 #endif
 
-#define FIRMWARE_VERSION "1.1.0"
+#define FIRMWARE_VERSION "1.2.0"
 
 /* wake word defaults for config.h files of older versions */
 #ifndef WAKE_WORD_ENABLED
@@ -356,6 +356,15 @@ static void handleControl(uint8_t type, const String &json) {
         volumeShownUntil = millis() + 1500;
       } else if (cmd == "chime") {
         chime(880, 120);
+      } else if (cmd == "interrupt") {
+        /* the server plays something right away (door bell): drop the queued answer and stop listening;
+           the queue is emptied here, not by the audio task, so the new sound that follows is kept */
+        playHead = playTail;
+        discardPlay = false;
+        playEndReceived = false;
+        listenAfterPlay = false;
+        chimeSamples = 0;
+        if (state == ST_LISTENING || state == ST_THINKING || state == ST_SPEAKING) setState(ST_IDLE);
       } else if (cmd == "reboot") {
         delay(200);
         ESP.restart();

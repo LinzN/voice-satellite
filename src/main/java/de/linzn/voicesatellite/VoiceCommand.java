@@ -18,9 +18,10 @@ import de.linzn.stem.modules.commandModule.ICommand;
 import org.json.JSONObject;
 
 import java.util.Arrays;
+import java.util.List;
 
 /**
- * STEM command: voice list | voice say &lt;device|all&gt; &lt;text&gt; | voice volume &lt;device&gt; &lt;0-10&gt; | voice reboot &lt;device&gt;
+ * STEM command: voice list | voice say &lt;device|all&gt; &lt;text&gt; | voice ring &lt;device|all&gt; | voice volume &lt;device&gt; &lt;0-10&gt; | voice reboot &lt;device&gt;
  * | voice record &lt;device|all&gt; on|off (save recordings only, for wake word training)
  * | voice capture &lt;device|all&gt; on|off (save recordings and answer normally, to check the microphone)
  */
@@ -54,6 +55,18 @@ public class VoiceCommand implements ICommand {
                         }
                     } else {
                         this.plugin.getMirraVoice().speak(this.plugin.connection(args[1]).map(SatelliteConnection::deviceId).orElse(args[1]), text);
+                    }
+                }
+                case "ring", "play" -> {
+                    if (args.length < 2) {
+                        return false;
+                    }
+                    String sound = args[0].equalsIgnoreCase("ring") ? "doorbell" : (args.length > 2 ? args[2] : "doorbell");
+                    List<String> targets = args[1].equalsIgnoreCase("all")
+                            ? this.plugin.connections().stream().map(SatelliteConnection::deviceId).toList()
+                            : List.of(this.plugin.connection(args[1]).map(SatelliteConnection::deviceId).orElse(args[1]));
+                    for (String target : targets) {
+                        this.plugin.getMirraVoice().play(target, sound);
                     }
                 }
                 case "volume" -> {

@@ -71,6 +71,13 @@ public class VoiceSatellitePlugin extends STEMPlugin {
                         .orElseThrow(() -> new IOException("Device " + deviceId + " is offline"));
                 connection.announce(text);
             }
+
+            @Override
+            public void play(String deviceId, String sound) throws Exception {
+                SatelliteConnection connection = VoiceSatellitePlugin.this.connection(deviceId)
+                        .orElseThrow(() -> new IOException("Device " + deviceId + " is offline"));
+                connection.playSound(Sounds.load(VoiceSatellitePlugin.this.soundsFolder(), sound));
+            }
         };
         this.getMirraVoice().registerSpeaker(this.speaker);
         this.getStemApi().commands().register("voice", new VoiceCommand(this));
@@ -94,6 +101,13 @@ public class VoiceSatellitePlugin extends STEMPlugin {
         if (this.workers != null) {
             this.workers.shutdownNow();
         }
+    }
+
+    /**
+     * Own sounds: {@code <name>.wav} replaces a built-in sound, e.g. doorbell.wav.
+     */
+    File soundsFolder() {
+        return new File(this.getDataFolder(), "sounds");
     }
 
     public MirraVoice getMirraVoice() {

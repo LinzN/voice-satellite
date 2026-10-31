@@ -371,6 +371,38 @@ public final class SatelliteConnection implements Runnable {
     }
 
     /**
+     * Play a sound right away (door bell): stops listening, drops a running question or answer and plays the
+     * sound instead. Firmware without the "interrupt" command still plays it, but only once it is idle.
+     *
+     * @param pcm PCM 16 bit mono with {@link Protocol#SAMPLE_RATE}
+     */
+    public void playSound(byte[] pcm) throws Exception {
+        int turn = this.generation.incrementAndGet();
+        this.mode = Mode.IDLE;
+        this.recording = null;
+        this.speechLock.lockInterruptibly();
+        try {
+            if (turn != this.generation.get() || this.closed) {
+                return;
+            }
+            this.command(new JSONObject().put("cmd", "interrupt"));
+            for (int offset = 0; offset < pcm.length; offset += PLAY_FRAME_BYTES) {
+                if (turn != this.generation.get() || this.closed) {
+                    return;
+                }
+                int length = Math.min(PLAY_FRAME_BYTES, pcm.length - offset);
+                byte[] frame = new byte[length];
+                System.arraycopy(pcm, offset, frame, 0, length);
+                this.send(Protocol.PLAY, frame);
+                this.mode = Mode.SPEAKING;
+            }
+            this.sendJson(Protocol.PLAY_END, new JSONObject().put("listen", false));
+        } finally {
+            this.speechLock.unlock();
+        }
+    }
+
+    /**
      * Synthesize and stream a text. The text is split into sentences so the first one plays while
      * the rest is still being synthesized.
      */
