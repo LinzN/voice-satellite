@@ -363,7 +363,6 @@ static void handleControl(uint8_t type, const String &json) {
         discardPlay = false;
         playEndReceived = false;
         listenAfterPlay = false;
-        chimeSamples = 0;
         if (state == ST_LISTENING || state == ST_THINKING || state == ST_SPEAKING) setState(ST_IDLE);
       } else if (cmd == "reboot") {
         delay(200);
